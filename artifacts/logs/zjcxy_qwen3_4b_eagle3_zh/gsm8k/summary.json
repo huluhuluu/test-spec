@@ -1,0 +1,20 @@
+{
+  "model_key": "zjcxy_qwen3_4b_eagle3_zh",
+  "dataset": "gsm8k",
+  "sample_count": 80,
+  "scored_count": 80,
+  "mean_score": 0.875,
+  "metric_name": "exact_match",
+  "mean_request_accept_length": 4.560400690927452,
+  "accept_length_histogram": {
+    "0": 303,
+    "1": 397,
+    "2": 395,
+    "3": 332,
+    "4": 316,
+    "5": 291,
+    "6": 207,
+    "7": 461
+  },
+  "spec_trace_event_count": 2702
+}

@@ -1,0 +1,1553 @@
+#!/root/miniconda3/envs/spec/bin/python
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import os
+import queue
+import random
+import re
+import shutil
+import subprocess
+import sys
+import textwrap
+import time
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any, Iterable, Optional
+
+
+ROOT = Path(__file__).resolve().parent
+ARTIFACTS = ROOT / "artifacts"
+SAMPLES_DIR = ARTIFACTS / "samples"
+LOGS_DIR = ARTIFACTS / "logs"
+REPORTS_DIR = ARTIFACTS / "reports"
+DEFAULT_HF_HOME = Path("/data/HUGGINGFACE")
+DEFAULT_CMMLU_REPO = ARTIFACTS / "external" / "CMMLU"
+DEFAULT_PROXY = "http://192.168.124.101:7890"
+
+SPEC_NUM_STEPS = 7
+SPEC_EAGLE_TOPK = 10
+SPEC_NUM_DRAFT_TOKENS = 32
+EVAL_CONTEXT_LENGTH = 1024
+DEFAULT_MAX_NEW_TOKENS = 512
+LONG_MAX_NEW_TOKENS = 1024
+PROMPT_TOKEN_SAFETY_MARGIN = 8
+MTBENCH_TURN1_HISTORY_RESERVE = 256
+SGLANG_INPUT_TOKEN_FUDGE = 32
+DEFAULT_GPUS = [0, 1, 2, 3]
+DEFAULT_SEED = 20260429
+BACKEND_SGLANG = "specforge_sglang"
+BACKEND_VLLM = "angelslim_vllm"
+SGLANG_PYTHON_BIN = "/root/miniconda3/envs/spec/bin/python"
+VLLM_PYTHON_BIN = "/root/miniconda3/envs/eagle3-vllm0112/bin/python"
+
+NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
+BOXED_RE = re.compile(r"\\boxed\{(.+?)\}")
+LETTER_RE = re.compile(r"\b([A-D])\b", re.IGNORECASE)
+CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+
+MODEL_REGISTRY = {
+    "qwen3_1p7b_eagle3": {
+        "display_name": "AngelSlim/Qwen3-1.7B_eagle3",
+        "draft_repo_id": "AngelSlim/Qwen3-1.7B_eagle3",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_VLLM,
+    },
+    "qwen3_4b_eagle3": {
+        "display_name": "AngelSlim/Qwen3-4B_eagle3",
+        "draft_repo_id": "AngelSlim/Qwen3-4B_eagle3",
+        "base_repo_id": "Qwen/Qwen3-4B-Instruct-2507",
+        "backend": BACKEND_VLLM,
+    },
+    "taobao_qwen3_4b_eagle3": {
+        "display_name": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3",
+        "draft_repo_id": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3",
+        "base_repo_id": "Qwen/Qwen3-4B-Instruct-2507",
+        "backend": BACKEND_SGLANG,
+    },
+    "zjcxy_qwen3_4b_eagle3_zh": {
+        "display_name": "Zjcxy-SmartAI/Eagle3-Qwen3-4B-Instruct-2507-zh",
+        "draft_repo_id": "Zjcxy-SmartAI/Eagle3-Qwen3-4B-Instruct-2507-zh",
+        "base_repo_id": "Qwen/Qwen3-4B-Instruct-2507",
+        "backend": BACKEND_SGLANG,
+    },
+    "hunyuan_1p8b_eagle3": {
+        "display_name": "AngelSlim/Hunyuan-1.8B-Instruct_eagle3",
+        "draft_repo_id": "AngelSlim/Hunyuan-1.8B-Instruct_eagle3",
+        "base_repo_id": "tencent/Hunyuan-1.8B-Instruct",
+        "backend": BACKEND_VLLM,
+    },
+    "hunyuan_4b_eagle3": {
+        "display_name": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
+        "draft_repo_id": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
+        "base_repo_id": "tencent/Hunyuan-4B-Instruct",
+        "backend": BACKEND_VLLM,
+    },
+}
+
+DATASET_NAMES = ["gsm8k", "math500", "mtbench", "humaneval", "ceval", "cmmlu"]
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    key: str
+    display_name: str
+    draft_repo_id: str
+    base_repo_id: str
+    backend: str
+
+    @property
+    def draft_local_dir(self) -> Path:
+        return DEFAULT_HF_HOME / repo_leaf(self.draft_repo_id)
+
+    @property
+    def base_local_dir(self) -> Path:
+        return DEFAULT_HF_HOME / repo_leaf(self.base_repo_id)
+
+    @property
+    def python_bin(self) -> str:
+        if self.backend == BACKEND_VLLM:
+            return VLLM_PYTHON_BIN
+        return SGLANG_PYTHON_BIN
+
+
+def repo_leaf(repo_id: str) -> str:
+    return repo_id.split("/")[-1]
+
+
+def model_specs(model_keys: Optional[list[str]] = None) -> list[ModelSpec]:
+    keys = model_keys or list(MODEL_REGISTRY)
+    return [ModelSpec(key=key, **MODEL_REGISTRY[key]) for key in keys]
+
+
+def ensure_dirs() -> None:
+    for path in (ARTIFACTS, SAMPLES_DIR, LOGS_DIR, REPORTS_DIR, DEFAULT_CMMLU_REPO.parent):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def json_dump(path: Path, obj: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + "\n")
+
+
+def append_jsonl(path: Path, record: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows = []
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                rows.append(json.loads(line))
+    return rows
+
+
+def safe_name(text: str) -> str:
+    return re.sub(r"[^0-9A-Za-z._-]+", "_", text).strip("_")
+
+
+def run_shell(command: str, env: Optional[dict[str, str]] = None) -> None:
+    print(f"$ {command}", flush=True)
+    subprocess.run(command, shell=True, check=True, env=env)
+
+
+def hf_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    env["HF_HOME"] = str(DEFAULT_HF_HOME)
+    return env
+
+
+def proxy_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env["http_proxy"] = DEFAULT_PROXY
+    env["https_proxy"] = DEFAULT_PROXY
+    return env
+
+
+def install_trace_patch(tokenizer: Any, trace_path: Path) -> None:
+    from sglang.srt.managers import scheduler_output_processor_mixin as sopm
+
+    if getattr(sopm, "_eagle3_trace_patched", False):
+        sopm._eagle3_trace_tokenizer = tokenizer
+        sopm._eagle3_trace_path = trace_path
+        return
+
+    original = sopm.SchedulerOutputProcessorMixin._resolve_spec_overlap_token_ids
+
+    def decode_tokens(token_ids: list[int]) -> list[str]:
+        items = []
+        for token_id in token_ids:
+            try:
+                items.append(
+                    tokenizer.decode(
+                        [token_id],
+                        clean_up_tokenization_spaces=False,
+                        skip_special_tokens=False,
+                    )
+                )
+            except Exception:
+                items.append(f"<decode_error:{token_id}>")
+        return items
+
+    def wrapped(self, result, batch):
+        predict_tokens = original(self, result, batch)
+        next_token_ids = result.next_token_ids.tolist()
+        accept_lens = result.accept_lens.tolist()
+        stride = self.draft_worker.speculative_num_draft_tokens
+        out_path = getattr(sopm, "_eagle3_trace_path", trace_path)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        with out_path.open("a", encoding="utf-8") as fh:
+            for i, req in enumerate(batch.reqs):
+                chunk = next_token_ids[i * stride : (i + 1) * stride]
+                accept_len = int(accept_lens[i])
+                accepted = chunk[:accept_len]
+                rejected = chunk[accept_len:]
+                event = {
+                    "ts": time.time(),
+                    "rid": req.rid,
+                    "accept_len": accept_len,
+                    "accepted_token_ids": accepted,
+                    "accepted_tokens": decode_tokens(accepted),
+                    "rejected_candidate_token_ids": rejected,
+                    "rejected_candidate_tokens": decode_tokens(rejected),
+                    "draft_chunk_token_ids": chunk,
+                    "draft_chunk_tokens": decode_tokens(chunk),
+                }
+                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
+        return predict_tokens
+
+    sopm.SchedulerOutputProcessorMixin._resolve_spec_overlap_token_ids = wrapped
+    sopm._eagle3_trace_patched = True
+    sopm._eagle3_trace_tokenizer = tokenizer
+    sopm._eagle3_trace_path = trace_path
+
+
+def prepare_datasets(
+    sample_size: int,
+    seed: int,
+    cmmlu_repo: Path,
+    dataset_names: Optional[list[str]] = None,
+    force: bool = False,
+) -> dict[str, Path]:
+    ensure_dirs()
+    paths = {}
+    for dataset_name in (dataset_names or DATASET_NAMES):
+        path = SAMPLES_DIR / f"{dataset_name}.jsonl"
+        if path.exists() and not force:
+            print(f"[reuse-sample] {dataset_name}: {path}")
+            paths[dataset_name] = path
+            continue
+
+        rows = build_dataset_samples(dataset_name, sample_size, seed, cmmlu_repo)
+        with path.open("w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        print(f"[write-sample] {dataset_name}: {path} ({len(rows)} rows)")
+        paths[dataset_name] = path
+    return paths
+
+
+def build_dataset_samples(dataset_name: str, sample_size: int, seed: int, cmmlu_repo: Path) -> list[dict[str, Any]]:
+    rng = random.Random(seed)
+    if dataset_name == "gsm8k":
+        rows = load_gsm8k()
+    elif dataset_name == "math500":
+        rows = load_math500()
+    elif dataset_name == "mtbench":
+        rows = load_mtbench()
+    elif dataset_name == "humaneval":
+        rows = load_humaneval()
+    elif dataset_name == "ceval":
+        rows = load_ceval()
+    elif dataset_name == "cmmlu":
+        rows = load_cmmlu(cmmlu_repo)
+    else:
+        raise ValueError(f"Unknown dataset: {dataset_name}")
+
+    if dataset_name == "mtbench":
+        sample = rows[:sample_size]
+    else:
+        if len(rows) < sample_size:
+            raise ValueError(f"{dataset_name} only has {len(rows)} rows")
+        sample = rng.sample(rows, sample_size)
+
+    for idx, row in enumerate(sample):
+        row["dataset"] = dataset_name
+        row["sample_index"] = idx
+    return sample
+
+
+def load_gsm8k() -> list[dict[str, Any]]:
+    from datasets import load_dataset
+
+    ds = load_dataset("openai/gsm8k", "main", split="test")
+    rows = []
+    for item in ds:
+        rows.append(
+            {
+                "sample_id": item["question"][:48],
+                "question": item["question"],
+                "gold_answer": item["answer"],
+            }
+        )
+    return rows
+
+
+def load_math500() -> list[dict[str, Any]]:
+    from datasets import load_dataset
+
+    ds = load_dataset("HuggingFaceH4/MATH-500", split="test")
+    rows = []
+    for item in ds:
+        rows.append(
+            {
+                "sample_id": item["unique_id"],
+                "question": item["problem"],
+                "gold_answer": item["answer"],
+                "subject": item["subject"],
+                "level": item["level"],
+                "solution": item["solution"],
+            }
+        )
+    return rows
+
+
+def load_mtbench() -> list[dict[str, Any]]:
+    from datasets import load_dataset
+
+    ds = load_dataset("HuggingFaceH4/mt_bench_prompts", split="train")
+    rows = []
+    for item in ds:
+        rows.append(
+            {
+                "sample_id": str(item["prompt_id"]),
+                "category": item["category"],
+                "turns": item["prompt"],
+                "reference": item["reference"],
+            }
+        )
+    return rows
+
+
+def load_humaneval() -> list[dict[str, Any]]:
+    from datasets import load_dataset
+
+    ds = load_dataset("openai/openai_humaneval", split="test")
+    rows = []
+    for item in ds:
+        rows.append(
+            {
+                "sample_id": item["task_id"],
+                "task_id": item["task_id"],
+                "prompt": item["prompt"],
+                "entry_point": item["entry_point"],
+                "test": item["test"],
+                "canonical_solution": item["canonical_solution"],
+            }
+        )
+    return rows
+
+
+def load_ceval() -> list[dict[str, Any]]:
+    from datasets import get_dataset_config_names, load_dataset
+
+    rows = []
+    for subject in get_dataset_config_names("ceval/ceval-exam"):
+        ds = load_dataset("ceval/ceval-exam", name=subject, split="val")
+        for item in ds:
+            rows.append(
+                {
+                    "sample_id": f"{subject}:{item['id']}",
+                    "subject": subject,
+                    "question": item["question"],
+                    "choices": {
+                        "A": item["A"],
+                        "B": item["B"],
+                        "C": item["C"],
+                        "D": item["D"],
+                    },
+                    "gold_answer": item["answer"],
+                    "explanation": item.get("explanation", ""),
+                }
+            )
+    return rows
+
+
+def ensure_cmmlu_repo(cmmlu_repo: Path) -> Path:
+    if cmmlu_repo.exists():
+        return cmmlu_repo
+
+    cmmlu_repo.parent.mkdir(parents=True, exist_ok=True)
+    cmd = (
+        f"export http_proxy={DEFAULT_PROXY} && "
+        f"export https_proxy={DEFAULT_PROXY} && "
+        f"git clone --depth 1 https://github.com/haonan-li/CMMLU.git {cmmlu_repo} && "
+        "unset http_proxy && unset https_proxy"
+    )
+    run_shell(cmd)
+    return cmmlu_repo
+
+
+def load_cmmlu(cmmlu_repo: Path) -> list[dict[str, Any]]:
+    cmmlu_repo = ensure_cmmlu_repo(cmmlu_repo)
+    rows = []
+    for csv_path in sorted((cmmlu_repo / "data" / "test").glob("*.csv")):
+        subject = csv_path.stem
+        with csv_path.open("r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            for row_idx, item in enumerate(reader):
+                qid = (
+                    item.get("Unnamed: 0")
+                    or item.get("")
+                    or item.get("id")
+                    or item.get("ID")
+                    or str(row_idx)
+                )
+                question = item.get("Question") or item.get("question")
+                answer = item.get("Answer") or item.get("answer")
+                rows.append(
+                    {
+                        "sample_id": f"{subject}:{qid}",
+                        "subject": subject,
+                        "question": question,
+                        "choices": {
+                            "A": item["A"],
+                            "B": item["B"],
+                            "C": item["C"],
+                            "D": item["D"],
+                        },
+                        "gold_answer": answer,
+                    }
+                )
+    return rows
+
+
+def build_prompt_messages(dataset_name: str, sample: dict[str, Any]) -> list[dict[str, str]]:
+    if dataset_name == "gsm8k":
+        user = (
+            "Solve the following grade-school math problem. "
+            "Show concise reasoning and end with `Final answer: <answer>`.\n\n"
+            f"Problem:\n{sample['question']}"
+        )
+        return [
+            {"role": "system", "content": "You are a careful math assistant."},
+            {"role": "user", "content": user},
+        ]
+    if dataset_name == "math500":
+        user = (
+            "Solve the following math problem. "
+            "Keep the reasoning concise and end with `Final answer: <answer>`.\n\n"
+            f"Problem:\n{sample['question']}"
+        )
+        return [
+            {"role": "system", "content": "You are a careful competition math assistant."},
+            {"role": "user", "content": user},
+        ]
+    if dataset_name in {"ceval", "cmmlu"}:
+        choices = "\n".join(f"{k}. {v}" for k, v in sample["choices"].items())
+        user = (
+            "请回答下面的单项选择题。只输出一个选项字母，并使用格式 `Final answer: A`。\n\n"
+            f"题目：{sample['question']}\n{choices}"
+        )
+        return [
+            {"role": "system", "content": "你是一个严谨的中文考试助手。"},
+            {"role": "user", "content": user},
+        ]
+    if dataset_name == "humaneval":
+        user = (
+            "Complete the following Python function. "
+            "Return only Python code for the function body completion, with no explanation.\n\n"
+            f"{sample['prompt']}"
+        )
+        return [
+            {"role": "system", "content": "You write correct Python code."},
+            {"role": "user", "content": user},
+        ]
+    if dataset_name == "mtbench":
+        return [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": sample["turns"][0]},
+        ]
+    raise ValueError(dataset_name)
+
+
+def render_chat_prompt(tokenizer: Any, messages: list[dict[str, str]]) -> str:
+    try:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+            enable_thinking=False,
+        )
+    except TypeError:
+        return tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+
+
+def sampling_params_for(dataset_name: str) -> dict[str, Any]:
+    params = {
+        "temperature": 0.0,
+        "top_p": 1.0,
+        "max_new_tokens": DEFAULT_MAX_NEW_TOKENS,
+    }
+    if dataset_name == "math500":
+        params["max_new_tokens"] = DEFAULT_MAX_NEW_TOKENS
+    elif dataset_name == "gsm8k":
+        params["max_new_tokens"] = DEFAULT_MAX_NEW_TOKENS
+    elif dataset_name == "humaneval":
+        params["max_new_tokens"] = LONG_MAX_NEW_TOKENS
+        params["stop"] = ["```", "\nif __name__ == '__main__':"]
+    elif dataset_name in {"ceval", "cmmlu"}:
+        params["max_new_tokens"] = 32
+    elif dataset_name == "mtbench":
+        params["temperature"] = 0.7
+        params["max_new_tokens"] = LONG_MAX_NEW_TOKENS
+    return params
+
+
+def count_prompt_tokens(tokenizer: Any, prompt: str) -> int:
+    return len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
+
+
+def adjusted_sampling_params(
+    tokenizer: Any,
+    prompt: str,
+    dataset_name: str,
+    *,
+    reserve_tokens: int = 0,
+    extra_input_tokens: int = 0,
+) -> tuple[dict[str, Any], int]:
+    params = sampling_params_for(dataset_name).copy()
+    requested_max_new_tokens = int(params["max_new_tokens"])
+    prompt_tokens = count_prompt_tokens(tokenizer, prompt)
+    available = (
+        (EVAL_CONTEXT_LENGTH - 1)
+        - prompt_tokens
+        - extra_input_tokens
+        - PROMPT_TOKEN_SAFETY_MARGIN
+        - reserve_tokens
+    )
+    params["max_new_tokens"] = max(1, min(requested_max_new_tokens, available))
+    return params, prompt_tokens
+
+
+def extract_final_number(text: str) -> Optional[str]:
+    if not text:
+        return None
+    match = re.search(r"Final answer\s*:\s*(.+)", text, flags=re.IGNORECASE)
+    source = match.group(1) if match else text
+    nums = NUM_RE.findall(source.replace("$", ""))
+    if not nums:
+        return None
+    return nums[-1].replace(",", "")
+
+
+def normalize_math_text(text: str) -> str:
+    text = text.strip()
+    boxed = BOXED_RE.findall(text)
+    if boxed:
+        text = boxed[-1]
+    text = text.replace("\\left", "").replace("\\right", "")
+    text = text.replace("$", "").replace(" ", "")
+    text = text.strip(".")
+    return text
+
+
+def parse_sympy_expr(text: str) -> Optional[Any]:
+    from sympy import sympify
+    from sympy.parsing.latex import parse_latex
+
+    text = normalize_math_text(text)
+    if not text:
+        return None
+    for parser in (parse_latex, sympify):
+        try:
+            return parser(text)
+        except Exception:
+            continue
+    return None
+
+
+def math_equiv(pred: str, gold: str) -> bool:
+    pred_norm = normalize_math_text(pred)
+    gold_norm = normalize_math_text(gold)
+    if pred_norm == gold_norm:
+        return True
+    pred_expr = parse_sympy_expr(pred_norm)
+    gold_expr = parse_sympy_expr(gold_norm)
+    if pred_expr is None or gold_expr is None:
+        return False
+    try:
+        return bool((pred_expr - gold_expr).equals(0))
+    except Exception:
+        return False
+
+
+def extract_letter_answer(text: str) -> Optional[str]:
+    if not text:
+        return None
+    match = re.search(r"Final answer\s*:\s*([A-D])", text, flags=re.IGNORECASE)
+    if match:
+        return match.group(1).upper()
+    letters = LETTER_RE.findall(text.upper())
+    return letters[-1].upper() if letters else None
+
+
+def extract_code_completion(text: str) -> str:
+    if not text:
+        return ""
+    match = CODE_BLOCK_RE.search(text)
+    if match:
+        return match.group(1).strip("\n")
+    return text.strip()
+
+
+def worker_run_humaneval(program: str, entry_point: str, test: str, timeout: int, result_path: Path) -> None:
+    namespace: dict[str, Any] = {}
+    exec(program, namespace)
+    exec(test, namespace)
+    namespace["check"](namespace[entry_point])
+    result_path.write_text("pass", encoding="utf-8")
+
+
+def humaneval_passes(sample: dict[str, Any], completion: str, timeout: int = 10) -> tuple[bool, str]:
+    import tempfile
+
+    completion = extract_code_completion(completion)
+    program = sample["prompt"] + completion + "\n"
+    with tempfile.TemporaryDirectory(prefix="humaneval_") as tmpdir:
+        result_path = Path(tmpdir) / "result.txt"
+        ctx = get_context("spawn")
+        proc = ctx.Process(
+            target=worker_run_humaneval,
+            args=(program, sample["entry_point"], sample["test"], timeout, result_path),
+        )
+        proc.start()
+        proc.join(timeout)
+        if proc.is_alive():
+            proc.terminate()
+            proc.join()
+            return False, "timeout"
+        if proc.exitcode == 0 and result_path.exists():
+            return True, "pass"
+        return False, f"exitcode={proc.exitcode}"
+
+
+def score_sample(dataset_name: str, sample: dict[str, Any], output: Any) -> dict[str, Any]:
+    if dataset_name == "mtbench":
+        return {"metric_name": "generation_only", "score": None}
+
+    if dataset_name == "gsm8k":
+        pred = extract_final_number(output["text"])
+        gold = extract_final_number(sample["gold_answer"])
+        correct = pred == gold and pred is not None
+        return {
+            "metric_name": "exact_match",
+            "score": 1.0 if correct else 0.0,
+            "predicted_answer": pred,
+            "gold_answer": gold,
+        }
+
+    if dataset_name == "math500":
+        pred_match = re.search(r"Final answer\s*:\s*(.+)", output["text"], flags=re.IGNORECASE)
+        pred = pred_match.group(1).strip() if pred_match else output["text"].strip()
+        gold = sample["gold_answer"]
+        correct = math_equiv(pred, gold)
+        return {
+            "metric_name": "math_equiv",
+            "score": 1.0 if correct else 0.0,
+            "predicted_answer": pred,
+            "gold_answer": gold,
+        }
+
+    if dataset_name in {"ceval", "cmmlu"}:
+        pred = extract_letter_answer(output["text"])
+        gold = sample["gold_answer"]
+        correct = pred == gold
+        return {
+            "metric_name": "accuracy",
+            "score": 1.0 if correct else 0.0,
+            "predicted_answer": pred,
+            "gold_answer": gold,
+        }
+
+    if dataset_name == "humaneval":
+        passed, reason = humaneval_passes(sample, output["text"])
+        return {
+            "metric_name": "pass@1",
+            "score": 1.0 if passed else 0.0,
+            "judge": reason,
+            "completion": extract_code_completion(output["text"]),
+        }
+
+    raise ValueError(dataset_name)
+
+
+def summarise_dataset_results(
+    model_key: str,
+    dataset_name: str,
+    results: list[dict[str, Any]],
+    trace_events: list[dict[str, Any]],
+) -> dict[str, Any]:
+    scored = [r["score"] for r in results if r["score"] is not None]
+    summary: dict[str, Any] = {
+        "model_key": model_key,
+        "dataset": dataset_name,
+        "sample_count": len(results),
+        "scored_count": len(scored),
+        "mean_score": (sum(scored) / len(scored)) if scored else None,
+        "metric_name": results[0]["metric_name"] if results else None,
+    }
+
+    meta_scores = [r.get("spec_accept_length") for r in results if r.get("spec_accept_length") is not None]
+    if meta_scores:
+        summary["mean_request_accept_length"] = sum(meta_scores) / len(meta_scores)
+
+    histogram = Counter()
+    for ev in trace_events:
+        if ev.get("accept_len") is not None:
+            histogram[int(ev["accept_len"])] += 1
+        elif ev.get("accept_length_histogram"):
+            for key, value in ev["accept_length_histogram"].items():
+                histogram[int(key)] += int(value)
+    summary["accept_length_histogram"] = {str(k): histogram[k] for k in sorted(histogram)}
+    summary["spec_trace_event_count"] = len(trace_events)
+    return summary
+
+
+def build_result_record(
+    model_spec: ModelSpec,
+    dataset_name: str,
+    sample: dict[str, Any],
+    rid: str,
+    response: dict[str, Any],
+    score: dict[str, Any],
+) -> dict[str, Any]:
+    meta = response.get("meta_info", {})
+    return {
+        "model_key": model_spec.key,
+        "model_name": model_spec.display_name,
+        "backend": model_spec.backend,
+        "dataset": dataset_name,
+        "sample_id": sample["sample_id"],
+        "rid": rid,
+        "text": response.get("text", ""),
+        "meta_info": meta,
+        "spec_accept_length": meta.get("spec_accept_length"),
+        "spec_accept_rate": meta.get("spec_accept_rate"),
+        "spec_verify_ct": meta.get("spec_verify_ct"),
+        **score,
+    }
+
+
+def sampling_params_for_vllm(dataset_name: str) -> dict[str, Any]:
+    params = sampling_params_for(dataset_name).copy()
+    max_new_tokens = params.pop("max_new_tokens")
+    params["max_tokens"] = max_new_tokens
+    return params
+
+
+def adjusted_sampling_params_for_vllm(
+    tokenizer: Any,
+    prompt: str,
+    dataset_name: str,
+    *,
+    reserve_tokens: int = 0,
+) -> tuple[dict[str, Any], int]:
+    params, prompt_tokens = adjusted_sampling_params(
+        tokenizer,
+        prompt,
+        dataset_name,
+        reserve_tokens=reserve_tokens,
+    )
+    max_new_tokens = params.pop("max_new_tokens")
+    params["max_tokens"] = max_new_tokens
+    return params, prompt_tokens
+
+
+def adjusted_sampling_params_for_sglang(
+    tokenizer: Any,
+    prompt: str,
+    dataset_name: str,
+    *,
+    reserve_tokens: int = 0,
+) -> tuple[dict[str, Any], int]:
+    return adjusted_sampling_params(
+        tokenizer,
+        prompt,
+        dataset_name,
+        reserve_tokens=reserve_tokens,
+        extra_input_tokens=SGLANG_INPUT_TOKEN_FUDGE,
+    )
+
+
+def snapshot_vllm_metrics(llm: Any) -> dict[str, Any]:
+    try:
+        metrics = llm.get_metrics()
+    except AssertionError:
+        return {}
+
+    snapshot: dict[str, Any] = {}
+    for metric in metrics:
+        if hasattr(metric, "values"):
+            snapshot[metric.name] = list(metric.values)
+        elif hasattr(metric, "value"):
+            snapshot[metric.name] = metric.value
+        elif hasattr(metric, "count") and hasattr(metric, "buckets"):
+            snapshot[metric.name] = {
+                "count": int(metric.count),
+                "sum": float(metric.sum),
+                "buckets": {str(k): int(v) for k, v in metric.buckets.items()},
+            }
+    return snapshot
+
+
+def diff_vllm_metric_snapshots(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    num_spec_tokens: int,
+) -> dict[str, Any]:
+    def get_counter(name: str) -> int:
+        return int(after.get(name, 0)) - int(before.get(name, 0))
+
+    def get_vector(name: str) -> list[int]:
+        a_vals = list(after.get(name, [0] * num_spec_tokens))
+        b_vals = list(before.get(name, [0] * num_spec_tokens))
+        if len(a_vals) < num_spec_tokens:
+            a_vals.extend([0] * (num_spec_tokens - len(a_vals)))
+        if len(b_vals) < num_spec_tokens:
+            b_vals.extend([0] * (num_spec_tokens - len(b_vals)))
+        return [int(a_vals[i]) - int(b_vals[i]) for i in range(num_spec_tokens)]
+
+    num_drafts = get_counter("vllm:spec_decode_num_drafts")
+    num_draft_tokens = get_counter("vllm:spec_decode_num_draft_tokens")
+    num_accepted_tokens = get_counter("vllm:spec_decode_num_accepted_tokens")
+    pos_counts = get_vector("vllm:spec_decode_num_accepted_tokens_per_pos")
+    return {
+        "num_drafts": num_drafts,
+        "num_draft_tokens": num_draft_tokens,
+        "num_accepted_tokens": num_accepted_tokens,
+        "acceptance_counts": pos_counts,
+        "mean_acceptance_length": (1 + (num_accepted_tokens / num_drafts)) if num_drafts > 0 else 1.0,
+    }
+
+
+def acceptance_histogram_from_pos_counts(
+    num_drafts: int,
+    pos_counts: list[int],
+) -> dict[str, int]:
+    histogram: dict[str, int] = {}
+    remaining = num_drafts
+    prev = num_drafts
+    for pos, count in enumerate(pos_counts):
+        exact = prev - count
+        if exact > 0:
+            histogram[str(pos + 1)] = exact
+        prev = count
+        remaining -= exact
+    if prev > 0:
+        histogram[str(len(pos_counts) + 1)] = prev
+    if remaining < 0:
+        raise ValueError(f"Invalid acceptance histogram state: num_drafts={num_drafts}, pos_counts={pos_counts}")
+    return histogram
+
+
+def build_vllm_trace_record(
+    rid: str,
+    delta: dict[str, Any],
+) -> dict[str, Any]:
+    histogram = acceptance_histogram_from_pos_counts(
+        num_drafts=delta["num_drafts"],
+        pos_counts=delta["acceptance_counts"],
+    )
+    return {
+        "rid": rid,
+        "backend": BACKEND_VLLM,
+        "num_drafts": delta["num_drafts"],
+        "num_draft_tokens": delta["num_draft_tokens"],
+        "num_accepted_tokens": delta["num_accepted_tokens"],
+        "mean_acceptance_length": delta["mean_acceptance_length"],
+        "acceptance_counts": delta["acceptance_counts"],
+        "accept_length_histogram": histogram,
+        "accepted_token_ids": None,
+        "accepted_tokens": None,
+        "rejected_candidate_token_ids": None,
+        "rejected_candidate_tokens": None,
+        "draft_chunk_token_ids": None,
+        "draft_chunk_tokens": None,
+    }
+
+
+def build_vllm_meta_info(delta: dict[str, Any]) -> dict[str, Any]:
+    num_drafts = delta["num_drafts"]
+    num_draft_tokens = delta["num_draft_tokens"]
+    num_accepted_tokens = delta["num_accepted_tokens"]
+    spec_accept_rate = (num_accepted_tokens / num_draft_tokens) if num_draft_tokens > 0 else None
+    return {
+        "spec_accept_length": delta["mean_acceptance_length"],
+        "spec_accept_rate": spec_accept_rate,
+        "spec_verify_ct": num_drafts,
+        "vllm_num_drafts": num_drafts,
+        "vllm_num_draft_tokens": num_draft_tokens,
+        "vllm_num_accepted_tokens": num_accepted_tokens,
+        "vllm_acceptance_counts": delta["acceptance_counts"],
+    }
+
+
+def flatten_trace_for_rids(trace_path: Path, request_ids: set[str]) -> list[dict[str, Any]]:
+    rows = []
+    for row in read_jsonl(trace_path):
+        if row.get("rid") in request_ids:
+            rows.append(row)
+    return rows
+
+
+def run_single_sample(
+    engine: Any,
+    tokenizer: Any,
+    model_spec: ModelSpec,
+    dataset_name: str,
+    sample: dict[str, Any],
+) -> dict[str, Any]:
+    rid = f"{dataset_name}::{safe_name(str(sample['sample_id']))}"
+
+    if dataset_name == "mtbench":
+        messages = build_prompt_messages(dataset_name, sample)
+        turns = []
+        for turn_index, user_turn in enumerate(sample["turns"]):
+            if turn_index == 0:
+                messages = [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": user_turn},
+                ]
+            else:
+                messages.append({"role": "user", "content": user_turn})
+            prompt = render_chat_prompt(tokenizer, messages)
+            sampling_params, prompt_tokens = adjusted_sampling_params_for_sglang(
+                tokenizer,
+                prompt,
+                "mtbench",
+                reserve_tokens=MTBENCH_TURN1_HISTORY_RESERVE if turn_index == 0 else 0,
+            )
+            response = engine.generate(
+                prompt=prompt,
+                sampling_params=sampling_params,
+                rid=f"{rid}:turn{turn_index+1}",
+            )
+            assistant_text = response["text"]
+            meta_info = dict(response.get("meta_info", {}))
+            meta_info["prompt_tokens"] = prompt_tokens
+            meta_info["max_new_tokens"] = sampling_params["max_new_tokens"]
+            turns.append({"turn_index": turn_index + 1, "text": assistant_text, "meta_info": meta_info})
+            messages.append({"role": "assistant", "content": assistant_text})
+        return {
+            "rid": rid,
+            "text": turns[-1]["text"] if turns else "",
+            "meta_info": turns[-1]["meta_info"] if turns else {},
+            "turns": turns,
+        }
+
+    messages = build_prompt_messages(dataset_name, sample)
+    prompt = render_chat_prompt(tokenizer, messages)
+    sampling_params, prompt_tokens = adjusted_sampling_params_for_sglang(
+        tokenizer,
+        prompt,
+        dataset_name,
+    )
+    response = engine.generate(
+        prompt=prompt,
+        sampling_params=sampling_params,
+        rid=rid,
+    )
+    response["rid"] = rid
+    response["meta_info"] = dict(response.get("meta_info", {}))
+    response["meta_info"]["prompt_tokens"] = prompt_tokens
+    response["meta_info"]["max_new_tokens"] = sampling_params["max_new_tokens"]
+    return response
+
+
+def evaluate_model_sglang(
+    model_key: str,
+    gpu_id: int,
+    sample_size: int,
+    seed: int,
+    cmmlu_repo: str,
+    dataset_names: list[str],
+) -> dict[str, Any]:
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    os.environ["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
+
+    from transformers import AutoTokenizer
+    from sglang.srt.entrypoints.engine import Engine
+
+    model_spec = model_specs([model_key])[0]
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_spec.base_local_dir),
+        trust_remote_code=True,
+    )
+
+    model_log_dir = LOGS_DIR / model_spec.key
+    if model_log_dir.exists():
+        shutil.rmtree(model_log_dir)
+    model_log_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = model_log_dir / "spec_trace_raw.jsonl"
+    os.environ["EAGLE3_TRACE_PATH"] = str(trace_path)
+    os.environ["EAGLE3_TRACE_TOKENIZER_PATH"] = str(model_spec.base_local_dir)
+
+    engine = Engine(
+        model_path=str(model_spec.base_local_dir),
+        tokenizer_path=str(model_spec.base_local_dir),
+        speculative_draft_model_path=str(model_spec.draft_local_dir),
+        speculative_algorithm="EAGLE3",
+        speculative_num_steps=SPEC_NUM_STEPS,
+        speculative_eagle_topk=SPEC_EAGLE_TOPK,
+        speculative_num_draft_tokens=SPEC_NUM_DRAFT_TOKENS,
+        trust_remote_code=True,
+        mem_fraction_static=0.72,
+        page_size=1,
+        context_length=EVAL_CONTEXT_LENGTH,
+    )
+
+    combined_path = model_log_dir / "combined_results.jsonl"
+    summaries = []
+    sample_paths = {name: SAMPLES_DIR / f"{name}.jsonl" for name in dataset_names}
+    missing = [str(path) for path in sample_paths.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing prepared sample files. Run `prepare-data` first. Missing: "
+            + ", ".join(missing)
+        )
+    try:
+        for dataset_name in dataset_names:
+            dataset_rows = read_jsonl(sample_paths[dataset_name])
+            request_ids: set[str] = set()
+            result_rows: list[dict[str, Any]] = []
+            dataset_dir = model_log_dir / dataset_name
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            results_path = dataset_dir / "results.jsonl"
+            if results_path.exists():
+                results_path.unlink()
+
+            for sample in dataset_rows:
+                response = run_single_sample(engine, tokenizer, model_spec, dataset_name, sample)
+                if dataset_name == "mtbench":
+                    for turn in response["turns"]:
+                        request_ids.add(f"{response['rid']}:turn{turn['turn_index']}")
+                    score = {"metric_name": "generation_only", "score": None}
+                else:
+                    request_ids.add(response["rid"])
+                    score = score_sample(dataset_name, sample, response)
+
+                record = build_result_record(
+                    model_spec=model_spec,
+                    dataset_name=dataset_name,
+                    sample=sample,
+                    rid=response["rid"],
+                    response=response,
+                    score=score,
+                )
+                if dataset_name == "mtbench":
+                    record["turns"] = response["turns"]
+                append_jsonl(results_path, record)
+                append_jsonl(combined_path, record)
+                result_rows.append(record)
+
+            trace_events = flatten_trace_for_rids(trace_path, request_ids)
+            trace_out = dataset_dir / "spec_trace.jsonl"
+            with trace_out.open("w", encoding="utf-8") as f:
+                for event in trace_events:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+            summary = summarise_dataset_results(
+                model_key=model_spec.key,
+                dataset_name=dataset_name,
+                results=result_rows,
+                trace_events=trace_events,
+            )
+            json_dump(dataset_dir / "summary.json", summary)
+            summaries.append(summary)
+    finally:
+        engine.shutdown()
+
+    final_summary = {
+        "model_key": model_spec.key,
+        "model_name": model_spec.display_name,
+        "backend": model_spec.backend,
+        "gpu_id": gpu_id,
+        "speculative_config": {
+            "speculative_num_steps": SPEC_NUM_STEPS,
+            "speculative_eagle_topk": SPEC_EAGLE_TOPK,
+            "speculative_num_draft_tokens": SPEC_NUM_DRAFT_TOKENS,
+            "context_length": EVAL_CONTEXT_LENGTH,
+        },
+        "datasets": summaries,
+    }
+    json_dump(model_log_dir / "model_summary.json", final_summary)
+    return final_summary
+
+
+def generate_vllm_single(
+    llm: Any,
+    prompt: str,
+    sampling_params_dict: dict[str, Any],
+) -> dict[str, Any]:
+    from vllm import SamplingParams
+
+    sampling_params = SamplingParams(**sampling_params_dict)
+    output = llm.generate([prompt], sampling_params=sampling_params)[0]
+    return {
+        "text": output.outputs[0].text,
+        "token_ids": list(output.outputs[0].token_ids),
+    }
+
+
+def run_vllm_single_sample(
+    llm: Any,
+    tokenizer: Any,
+    model_spec: ModelSpec,
+    dataset_name: str,
+    sample: dict[str, Any],
+    num_spec_tokens: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    rid = f"{dataset_name}::{safe_name(str(sample['sample_id']))}"
+    before_metrics = snapshot_vllm_metrics(llm)
+
+    if dataset_name == "mtbench":
+        messages = [{"role": "system", "content": "You are a helpful assistant."}]
+        turns = []
+        for turn_index, user_turn in enumerate(sample["turns"]):
+            messages.append({"role": "user", "content": user_turn})
+            prompt = render_chat_prompt(tokenizer, messages)
+            sampling_params, prompt_tokens = adjusted_sampling_params_for_vllm(
+                tokenizer,
+                prompt,
+                "mtbench",
+                reserve_tokens=MTBENCH_TURN1_HISTORY_RESERVE if turn_index == 0 else 0,
+            )
+            output = generate_vllm_single(llm, prompt, sampling_params)
+            turns.append(
+                {
+                    "turn_index": turn_index + 1,
+                    "text": output["text"],
+                    "token_ids": output["token_ids"],
+                    "meta_info": {
+                        "prompt_tokens": prompt_tokens,
+                        "max_new_tokens": sampling_params["max_tokens"],
+                    },
+                }
+            )
+            messages.append({"role": "assistant", "content": output["text"]})
+        after_metrics = snapshot_vllm_metrics(llm)
+        delta = diff_vllm_metric_snapshots(before_metrics, after_metrics, num_spec_tokens)
+        meta_info = build_vllm_meta_info(delta)
+        for turn in turns:
+            turn["meta_info"] = {**turn["meta_info"], **meta_info}
+        response = {
+            "rid": rid,
+            "text": turns[-1]["text"] if turns else "",
+            "token_ids": turns[-1]["token_ids"] if turns else [],
+            "meta_info": {**meta_info, **(turns[-1]["meta_info"] if turns else {})},
+            "turns": turns,
+        }
+        return response, delta
+
+    messages = build_prompt_messages(dataset_name, sample)
+    prompt = render_chat_prompt(tokenizer, messages)
+    sampling_params, prompt_tokens = adjusted_sampling_params_for_vllm(
+        tokenizer,
+        prompt,
+        dataset_name,
+    )
+    output = generate_vllm_single(llm, prompt, sampling_params)
+    after_metrics = snapshot_vllm_metrics(llm)
+    delta = diff_vllm_metric_snapshots(before_metrics, after_metrics, num_spec_tokens)
+    response = {
+        "rid": rid,
+        "text": output["text"],
+        "token_ids": output["token_ids"],
+        "meta_info": {
+            **build_vllm_meta_info(delta),
+            "prompt_tokens": prompt_tokens,
+            "max_new_tokens": sampling_params["max_tokens"],
+        },
+    }
+    return response, delta
+
+
+def evaluate_model_vllm(
+    model_key: str,
+    gpu_id: int,
+    sample_size: int,
+    seed: int,
+    cmmlu_repo: str,
+    dataset_names: list[str],
+) -> dict[str, Any]:
+    del sample_size, seed, cmmlu_repo
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
+    os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
+    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+    from transformers import AutoTokenizer
+    from vllm import LLM
+
+    model_spec = model_specs([model_key])[0]
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_spec.base_local_dir),
+        trust_remote_code=True,
+    )
+
+    model_log_dir = LOGS_DIR / model_spec.key
+    if model_log_dir.exists():
+        shutil.rmtree(model_log_dir)
+    model_log_dir.mkdir(parents=True, exist_ok=True)
+
+    llm = LLM(
+        model=str(model_spec.base_local_dir),
+        trust_remote_code=True,
+        tensor_parallel_size=1,
+        enable_chunked_prefill=False,
+        enforce_eager=False,
+        gpu_memory_utilization=0.8,
+        speculative_config={
+            "method": "eagle3",
+            "model": str(model_spec.draft_local_dir),
+            "num_speculative_tokens": SPEC_NUM_DRAFT_TOKENS,
+        },
+        disable_log_stats=False,
+        max_model_len=EVAL_CONTEXT_LENGTH,
+        max_num_seqs=1,
+        max_cudagraph_capture_size=24,
+    )
+
+    combined_path = model_log_dir / "combined_results.jsonl"
+    summaries = []
+    sample_paths = {name: SAMPLES_DIR / f"{name}.jsonl" for name in dataset_names}
+    missing = [str(path) for path in sample_paths.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing prepared sample files. Run `prepare-data` first. Missing: "
+            + ", ".join(missing)
+        )
+
+    try:
+        for dataset_name in dataset_names:
+            dataset_rows = read_jsonl(sample_paths[dataset_name])
+            result_rows: list[dict[str, Any]] = []
+            trace_events: list[dict[str, Any]] = []
+            dataset_dir = model_log_dir / dataset_name
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            results_path = dataset_dir / "results.jsonl"
+            if results_path.exists():
+                results_path.unlink()
+
+            for sample in dataset_rows:
+                response, delta = run_vllm_single_sample(
+                    llm=llm,
+                    tokenizer=tokenizer,
+                    model_spec=model_spec,
+                    dataset_name=dataset_name,
+                    sample=sample,
+                    num_spec_tokens=SPEC_NUM_DRAFT_TOKENS,
+                )
+                if dataset_name == "mtbench":
+                    score = {"metric_name": "generation_only", "score": None}
+                else:
+                    score = score_sample(dataset_name, sample, response)
+
+                record = build_result_record(
+                    model_spec=model_spec,
+                    dataset_name=dataset_name,
+                    sample=sample,
+                    rid=response["rid"],
+                    response=response,
+                    score=score,
+                )
+                record["output_token_ids"] = response.get("token_ids", [])
+                if dataset_name == "mtbench":
+                    record["turns"] = response["turns"]
+                append_jsonl(results_path, record)
+                append_jsonl(combined_path, record)
+                result_rows.append(record)
+                trace_events.append(build_vllm_trace_record(response["rid"], delta))
+
+            trace_out = dataset_dir / "spec_trace.jsonl"
+            with trace_out.open("w", encoding="utf-8") as f:
+                for event in trace_events:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+            summary = summarise_dataset_results(
+                model_key=model_spec.key,
+                dataset_name=dataset_name,
+                results=result_rows,
+                trace_events=trace_events,
+            )
+            json_dump(dataset_dir / "summary.json", summary)
+            summaries.append(summary)
+    finally:
+        del llm
+
+    final_summary = {
+        "model_key": model_spec.key,
+        "model_name": model_spec.display_name,
+        "backend": model_spec.backend,
+        "gpu_id": gpu_id,
+        "speculative_config": {
+            "method": "eagle3",
+            "num_speculative_tokens": SPEC_NUM_DRAFT_TOKENS,
+            "context_length": EVAL_CONTEXT_LENGTH,
+        },
+        "datasets": summaries,
+    }
+    json_dump(model_log_dir / "model_summary.json", final_summary)
+    return final_summary
+
+
+def evaluate_model_current_process(
+    model_key: str,
+    gpu_id: int,
+    sample_size: int,
+    seed: int,
+    cmmlu_repo: str,
+    dataset_names: list[str],
+) -> dict[str, Any]:
+    model_spec = model_specs([model_key])[0]
+    if model_spec.backend == BACKEND_VLLM:
+        return evaluate_model_vllm(model_key, gpu_id, sample_size, seed, cmmlu_repo, dataset_names)
+    return evaluate_model_sglang(model_key, gpu_id, sample_size, seed, cmmlu_repo, dataset_names)
+
+
+def orchestrate_run(
+    model_keys: list[str],
+    gpus: list[int],
+    sample_size: int,
+    seed: int,
+    cmmlu_repo: Path,
+    dataset_names: list[str],
+) -> list[dict[str, Any]]:
+    ensure_dirs()
+    pending_models = queue.SimpleQueue()
+    for model_key in model_keys:
+        pending_models.put(model_key)
+
+    def run_model_subprocess(model_key: str, gpu_id: int) -> dict[str, Any]:
+        model_spec = model_specs([model_key])[0]
+        if not Path(model_spec.python_bin).exists():
+            raise FileNotFoundError(
+                f"Missing python for backend {model_spec.backend}: {model_spec.python_bin}"
+            )
+        worker_log = REPORTS_DIR / f"{model_spec.key}.worker.log"
+        cmd = [
+            model_spec.python_bin,
+            str(ROOT / "run_eval.py"),
+            "run-model",
+            "--model",
+            model_key,
+            "--gpu",
+            str(gpu_id),
+            "--sample-size",
+            str(sample_size),
+            "--seed",
+            str(seed),
+            "--cmmlu-repo",
+            str(cmmlu_repo),
+            "--datasets",
+            *dataset_names,
+        ]
+        env = os.environ.copy()
+        env["HF_HOME"] = str(DEFAULT_HF_HOME)
+        env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        with worker_log.open("w", encoding="utf-8") as f:
+            subprocess.run(cmd, check=True, env=env, stdout=f, stderr=subprocess.STDOUT)
+        summary_path = LOGS_DIR / model_spec.key / "model_summary.json"
+        return json.loads(summary_path.read_text(encoding="utf-8"))
+
+    results: list[dict[str, Any]] = []
+
+    with ThreadPoolExecutor(max_workers=len(gpus)) as executor:
+        future_to_gpu = {}
+        for gpu_id in gpus:
+            if pending_models.empty():
+                break
+            model_key = pending_models.get()
+            future = executor.submit(run_model_subprocess, model_key, gpu_id)
+            future_to_gpu[future] = gpu_id
+
+        while future_to_gpu:
+            for future in as_completed(list(future_to_gpu)):
+                gpu_id = future_to_gpu.pop(future)
+                results.append(future.result())
+                if not pending_models.empty():
+                    model_key = pending_models.get()
+                    new_future = executor.submit(run_model_subprocess, model_key, gpu_id)
+                    future_to_gpu[new_future] = gpu_id
+                break
+
+    json_dump(REPORTS_DIR / "run_summary.json", results)
+    write_markdown_summary(results, REPORTS_DIR / "run_summary.md")
+    return results
+
+
+def write_markdown_summary(results: list[dict[str, Any]], path: Path) -> None:
+    lines = [
+        "# EAGLE-3 Eval Summary",
+        "",
+        f"- Sample size per dataset: 80",
+        f"- GPUs: {', '.join(map(str, DEFAULT_GPUS))}",
+        f"- Speculative config: steps={SPEC_NUM_STEPS}, topk={SPEC_EAGLE_TOPK}, draft_tokens={SPEC_NUM_DRAFT_TOKENS}",
+        "",
+    ]
+    for result in results:
+        lines.append(f"## {result['model_name']}")
+        lines.append("")
+        lines.append(f"- GPU: {result['gpu_id']}")
+        lines.append(f"- Backend: {result.get('backend', 'unknown')}")
+        for dataset in result["datasets"]:
+            score = dataset["mean_score"]
+            score_text = "n/a" if score is None else f"{score:.4f}"
+            hist = ", ".join(f"{k}:{v}" for k, v in dataset["accept_length_histogram"].items()) or "n/a"
+            lines.append(
+                f"- {dataset['dataset']}: score={score_text}, "
+                f"request_accept_len={dataset.get('mean_request_accept_length', 'n/a')}, "
+                f"accept_hist={hist}"
+            )
+        lines.append("")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def download_models(selected_models: list[str]) -> None:
+    ensure_dirs()
+    hfd = DEFAULT_HF_HOME / "hfd.sh"
+    if not hfd.exists():
+        raise FileNotFoundError(f"Missing downloader: {hfd}")
+
+    env = hf_env()
+    for spec in model_specs(selected_models):
+        for repo_id in [spec.base_repo_id, spec.draft_repo_id]:
+            local_dir = DEFAULT_HF_HOME / repo_leaf(repo_id)
+            cmd = f"cd {DEFAULT_HF_HOME} && bash {hfd} {repo_id} --local-dir {local_dir}"
+            run_shell(cmd, env=env)
+
+
+def smoke_test(cmmlu_repo: Path, sample_size: int, seed: int, dataset_names: list[str]) -> None:
+    paths = prepare_datasets(
+        sample_size=sample_size,
+        seed=seed,
+        cmmlu_repo=cmmlu_repo,
+        dataset_names=dataset_names,
+    )
+    summary = {}
+    for name, path in paths.items():
+        rows = read_jsonl(path)
+        summary[name] = {"count": len(rows), "first_sample_id": rows[0]["sample_id"]}
+    json_dump(REPORTS_DIR / "smoke_summary.json", summary)
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="EAGLE-3 benchmark harness")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--sample-size", type=int, default=80)
+    common.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    common.add_argument("--cmmlu-repo", type=Path, default=DEFAULT_CMMLU_REPO)
+    common.add_argument("--datasets", nargs="*", default=DATASET_NAMES, choices=DATASET_NAMES)
+    common.add_argument("--force-resample", action="store_true")
+
+    p_download = sub.add_parser("download-models")
+    p_download.add_argument("--models", nargs="*", default=list(MODEL_REGISTRY))
+
+    p_cmmlu = sub.add_parser("download-cmmlu")
+    p_cmmlu.add_argument("--cmmlu-repo", type=Path, default=DEFAULT_CMMLU_REPO)
+
+    p_prepare = sub.add_parser("prepare-data", parents=[common])
+
+    p_run = sub.add_parser("run", parents=[common])
+    p_run.add_argument("--models", nargs="*", default=list(MODEL_REGISTRY))
+    p_run.add_argument("--gpus", nargs="*", type=int, default=DEFAULT_GPUS)
+
+    p_run_model = sub.add_parser("run-model", parents=[common])
+    p_run_model.add_argument("--model", required=True, choices=list(MODEL_REGISTRY))
+    p_run_model.add_argument("--gpu", required=True, type=int)
+
+    p_smoke = sub.add_parser("smoke", parents=[common])
+
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    ensure_dirs()
+
+    if args.command == "download-models":
+        download_models(args.models)
+        return
+
+    if args.command == "download-cmmlu":
+        ensure_cmmlu_repo(args.cmmlu_repo)
+        return
+
+    if args.command == "prepare-data":
+        prepare_datasets(
+            args.sample_size,
+            args.seed,
+            args.cmmlu_repo,
+            args.datasets,
+            force=args.force_resample,
+        )
+        return
+
+    if args.command == "run":
+        prepare_datasets(
+            args.sample_size,
+            args.seed,
+            args.cmmlu_repo,
+            args.datasets,
+            force=False,
+        )
+        orchestrate_run(
+            args.models,
+            args.gpus,
+            args.sample_size,
+            args.seed,
+            args.cmmlu_repo,
+            args.datasets,
+        )
+        return
+
+    if args.command == "run-model":
+        evaluate_model_current_process(
+            args.model,
+            args.gpu,
+            args.sample_size,
+            args.seed,
+            str(args.cmmlu_repo),
+            args.datasets,
+        )
+        return
+
+    if args.command == "smoke":
+        smoke_test(args.cmmlu_repo, args.sample_size, args.seed, args.datasets)
+        return
+
+
+if __name__ == "__main__":
+    main()

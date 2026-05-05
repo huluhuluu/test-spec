@@ -1,0 +1,26 @@
+{
+  "gsm8k": {
+    "count": 80,
+    "first_sample_id": "Janet buys a brooch for her daughter.  She pays "
+  },
+  "math500": {
+    "count": 80,
+    "first_sample_id": "test/precalculus/990.json"
+  },
+  "mtbench": {
+    "count": 80,
+    "first_sample_id": "44067482"
+  },
+  "humaneval": {
+    "count": 80,
+    "first_sample_id": "HumanEval/7"
+  },
+  "ceval": {
+    "count": 80,
+    "first_sample_id": "advanced_mathematics:12"
+  },
+  "cmmlu": {
+    "count": 80,
+    "first_sample_id": "arts:7"
+  }
+}

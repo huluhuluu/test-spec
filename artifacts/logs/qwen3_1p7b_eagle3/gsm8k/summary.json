@@ -1,0 +1,25 @@
+{
+  "model_key": "qwen3_1p7b_eagle3",
+  "dataset": "gsm8k",
+  "sample_count": 80,
+  "scored_count": 80,
+  "mean_score": 0.6875,
+  "metric_name": "exact_match",
+  "mean_request_accept_length": 2.671096288616938,
+  "accept_length_histogram": {
+    "1": 1426,
+    "2": 1167,
+    "3": 809,
+    "4": 515,
+    "5": 304,
+    "6": 176,
+    "7": 94,
+    "8": 53,
+    "9": 19,
+    "10": 19,
+    "11": 8,
+    "12": 5,
+    "13": 1
+  },
+  "spec_trace_event_count": 80
+}

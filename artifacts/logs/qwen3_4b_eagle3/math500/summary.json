@@ -1,0 +1,21 @@
+{
+  "model_key": "qwen3_4b_eagle3",
+  "dataset": "math500",
+  "sample_count": 80,
+  "scored_count": 80,
+  "mean_score": 0.3,
+  "metric_name": "math_equiv",
+  "mean_request_accept_length": 2.1428604167034764,
+  "accept_length_histogram": {
+    "1": 5186,
+    "2": 4519,
+    "3": 2786,
+    "4": 1194,
+    "5": 328,
+    "6": 94,
+    "7": 28,
+    "8": 3,
+    "9": 1
+  },
+  "spec_trace_event_count": 80
+}

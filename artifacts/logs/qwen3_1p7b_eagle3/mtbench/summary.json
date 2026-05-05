@@ -1,0 +1,29 @@
+{
+  "model_key": "qwen3_1p7b_eagle3",
+  "dataset": "mtbench",
+  "sample_count": 80,
+  "scored_count": 0,
+  "mean_score": null,
+  "metric_name": "generation_only",
+  "mean_request_accept_length": 2.4873038270150145,
+  "accept_length_histogram": {
+    "1": 9430,
+    "2": 5379,
+    "3": 3257,
+    "4": 1677,
+    "5": 926,
+    "6": 533,
+    "7": 278,
+    "8": 177,
+    "9": 102,
+    "10": 72,
+    "11": 40,
+    "12": 16,
+    "13": 10,
+    "14": 6,
+    "15": 3,
+    "16": 1,
+    "17": 1
+  },
+  "spec_trace_event_count": 80
+}

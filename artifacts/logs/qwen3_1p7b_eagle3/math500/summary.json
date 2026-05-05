@@ -1,0 +1,28 @@
+{
+  "model_key": "qwen3_1p7b_eagle3",
+  "dataset": "math500",
+  "sample_count": 80,
+  "scored_count": 80,
+  "mean_score": 0.0625,
+  "metric_name": "math_equiv",
+  "mean_request_accept_length": 2.725507725543737,
+  "accept_length_histogram": {
+    "1": 3231,
+    "2": 2458,
+    "3": 1663,
+    "4": 1014,
+    "5": 629,
+    "6": 407,
+    "7": 237,
+    "8": 145,
+    "9": 65,
+    "10": 55,
+    "11": 27,
+    "12": 8,
+    "13": 8,
+    "14": 2,
+    "15": 1,
+    "16": 1
+  },
+  "spec_trace_event_count": 80
+}
