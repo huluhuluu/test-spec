@@ -2,3 +2,9 @@ findings.md
 progress.md
 task_plan.md
 AGENNTS.md
+__pycache__/
+*.pyc
+artifacts/logs/
+artifacts/reports/
+artifacts/samples/
+artifacts/tmux_logs/

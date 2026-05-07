@@ -1,0 +1,6 @@
+{
+  "model_path": "/data/HUGGINGFACE",
+  "data_path": "/data/HUGGINGFACE/data",
+  "hfd_path": "/data/HUGGINGFACE/hfd.sh",
+  "hf_endpoint": "https://hf-mirror.com"
+}

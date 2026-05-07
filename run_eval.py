@@ -1,34 +1,30 @@
-#!/root/miniconda3/envs/spec/bin/python
+#!/usr/bin/env python
 from __future__ import annotations
 
 import argparse
-import csv
 import json
-import math
 import os
 import queue
-import random
 import re
 import shutil
 import subprocess
 import sys
-import textwrap
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Optional
 
+from eval.config_loader import MODEL_PATH
+from eval.prepare_data import DATASET_NAMES, DEFAULT_CMMLU_REPO
 
 ROOT = Path(__file__).resolve().parent
 ARTIFACTS = ROOT / "artifacts"
 SAMPLES_DIR = ARTIFACTS / "samples"
 LOGS_DIR = ARTIFACTS / "logs"
 REPORTS_DIR = ARTIFACTS / "reports"
-DEFAULT_HF_HOME = Path("/data/HUGGINGFACE")
-DEFAULT_CMMLU_REPO = ARTIFACTS / "external" / "CMMLU"
-DEFAULT_PROXY = "http://192.168.124.101:7890"
+DEFAULT_HF_HOME = MODEL_PATH.expanduser()
 
 SPEC_NUM_STEPS = 7
 SPEC_EAGLE_TOPK = 10
@@ -43,8 +39,10 @@ DEFAULT_GPUS = [0, 1, 2, 3]
 DEFAULT_SEED = 20260429
 BACKEND_SGLANG = "specforge_sglang"
 BACKEND_VLLM = "angelslim_vllm"
-SGLANG_PYTHON_BIN = "/root/miniconda3/envs/spec/bin/python"
-VLLM_PYTHON_BIN = "/root/miniconda3/envs/eagle3-vllm0112/bin/python"
+SGLANG_PYTHON_BIN = os.environ.get("SGLANG_PYTHON_BIN")
+VLLM_PYTHON_BIN = os.environ.get("VLLM_PYTHON_BIN")
+SGLANG_CONDA_ENV = os.environ.get("SGLANG_CONDA_ENV", "eagle3-sglang-bench")
+VLLM_CONDA_ENV = os.environ.get("VLLM_CONDA_ENV", "eagle3-vllm-bench")
 
 NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 BOXED_RE = re.compile(r"\\boxed\{(.+?)\}")
@@ -61,7 +59,7 @@ MODEL_REGISTRY = {
     "qwen3_4b_eagle3": {
         "display_name": "AngelSlim/Qwen3-4B_eagle3",
         "draft_repo_id": "AngelSlim/Qwen3-4B_eagle3",
-        "base_repo_id": "Qwen/Qwen3-4B-Instruct-2507",
+        "base_repo_id": "Qwen/Qwen3-4B",
         "backend": BACKEND_VLLM,
     },
     "taobao_qwen3_4b_eagle3": {
@@ -90,7 +88,25 @@ MODEL_REGISTRY = {
     },
 }
 
-DATASET_NAMES = ["gsm8k", "math500", "mtbench", "humaneval", "ceval", "cmmlu"]
+def conda_python_bin(env_name: str) -> Optional[str]:
+    if not shutil.which("conda"):
+        return None
+    try:
+        output = subprocess.check_output(
+            ["conda", "run", "-n", env_name, "python", "-c", "import sys; print(sys.executable)"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except subprocess.CalledProcessError:
+        return None
+    path = output.strip().splitlines()[-1] if output.strip() else ""
+    return path or None
+
+
+def backend_python_bin(backend: str) -> Optional[str]:
+    if backend == BACKEND_VLLM:
+        return VLLM_PYTHON_BIN or conda_python_bin(VLLM_CONDA_ENV)
+    return SGLANG_PYTHON_BIN or conda_python_bin(SGLANG_CONDA_ENV) or sys.executable
 
 
 @dataclass(frozen=True)
@@ -111,9 +127,15 @@ class ModelSpec:
 
     @property
     def python_bin(self) -> str:
-        if self.backend == BACKEND_VLLM:
-            return VLLM_PYTHON_BIN
-        return SGLANG_PYTHON_BIN
+        python_bin = backend_python_bin(self.backend)
+        if not python_bin:
+            env_name = VLLM_CONDA_ENV if self.backend == BACKEND_VLLM else SGLANG_CONDA_ENV
+            raise FileNotFoundError(
+                f"Cannot resolve Python for backend {self.backend}. "
+                f"Set {'VLLM_PYTHON_BIN' if self.backend == BACKEND_VLLM else 'SGLANG_PYTHON_BIN'} "
+                f"or create conda env {env_name}."
+            )
+        return python_bin
 
 
 def repo_leaf(repo_id: str) -> str:
@@ -126,7 +148,7 @@ def model_specs(model_keys: Optional[list[str]] = None) -> list[ModelSpec]:
 
 
 def ensure_dirs() -> None:
-    for path in (ARTIFACTS, SAMPLES_DIR, LOGS_DIR, REPORTS_DIR, DEFAULT_CMMLU_REPO.parent):
+    for path in (ARTIFACTS, SAMPLES_DIR, LOGS_DIR, REPORTS_DIR):
         path.mkdir(parents=True, exist_ok=True)
 
 
@@ -155,25 +177,6 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def safe_name(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z._-]+", "_", text).strip("_")
-
-
-def run_shell(command: str, env: Optional[dict[str, str]] = None) -> None:
-    print(f"$ {command}", flush=True)
-    subprocess.run(command, shell=True, check=True, env=env)
-
-
-def hf_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["HF_ENDPOINT"] = "https://hf-mirror.com"
-    env["HF_HOME"] = str(DEFAULT_HF_HOME)
-    return env
-
-
-def proxy_env() -> dict[str, str]:
-    env = os.environ.copy()
-    env["http_proxy"] = DEFAULT_PROXY
-    env["https_proxy"] = DEFAULT_PROXY
-    return env
 
 
 def install_trace_patch(tokenizer: Any, trace_path: Path) -> None:
@@ -233,206 +236,6 @@ def install_trace_patch(tokenizer: Any, trace_path: Path) -> None:
     sopm._eagle3_trace_patched = True
     sopm._eagle3_trace_tokenizer = tokenizer
     sopm._eagle3_trace_path = trace_path
-
-
-def prepare_datasets(
-    sample_size: int,
-    seed: int,
-    cmmlu_repo: Path,
-    dataset_names: Optional[list[str]] = None,
-    force: bool = False,
-) -> dict[str, Path]:
-    ensure_dirs()
-    paths = {}
-    for dataset_name in (dataset_names or DATASET_NAMES):
-        path = SAMPLES_DIR / f"{dataset_name}.jsonl"
-        if path.exists() and not force:
-            print(f"[reuse-sample] {dataset_name}: {path}")
-            paths[dataset_name] = path
-            continue
-
-        rows = build_dataset_samples(dataset_name, sample_size, seed, cmmlu_repo)
-        with path.open("w", encoding="utf-8") as f:
-            for row in rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-        print(f"[write-sample] {dataset_name}: {path} ({len(rows)} rows)")
-        paths[dataset_name] = path
-    return paths
-
-
-def build_dataset_samples(dataset_name: str, sample_size: int, seed: int, cmmlu_repo: Path) -> list[dict[str, Any]]:
-    rng = random.Random(seed)
-    if dataset_name == "gsm8k":
-        rows = load_gsm8k()
-    elif dataset_name == "math500":
-        rows = load_math500()
-    elif dataset_name == "mtbench":
-        rows = load_mtbench()
-    elif dataset_name == "humaneval":
-        rows = load_humaneval()
-    elif dataset_name == "ceval":
-        rows = load_ceval()
-    elif dataset_name == "cmmlu":
-        rows = load_cmmlu(cmmlu_repo)
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
-
-    if dataset_name == "mtbench":
-        sample = rows[:sample_size]
-    else:
-        if len(rows) < sample_size:
-            raise ValueError(f"{dataset_name} only has {len(rows)} rows")
-        sample = rng.sample(rows, sample_size)
-
-    for idx, row in enumerate(sample):
-        row["dataset"] = dataset_name
-        row["sample_index"] = idx
-    return sample
-
-
-def load_gsm8k() -> list[dict[str, Any]]:
-    from datasets import load_dataset
-
-    ds = load_dataset("openai/gsm8k", "main", split="test")
-    rows = []
-    for item in ds:
-        rows.append(
-            {
-                "sample_id": item["question"][:48],
-                "question": item["question"],
-                "gold_answer": item["answer"],
-            }
-        )
-    return rows
-
-
-def load_math500() -> list[dict[str, Any]]:
-    from datasets import load_dataset
-
-    ds = load_dataset("HuggingFaceH4/MATH-500", split="test")
-    rows = []
-    for item in ds:
-        rows.append(
-            {
-                "sample_id": item["unique_id"],
-                "question": item["problem"],
-                "gold_answer": item["answer"],
-                "subject": item["subject"],
-                "level": item["level"],
-                "solution": item["solution"],
-            }
-        )
-    return rows
-
-
-def load_mtbench() -> list[dict[str, Any]]:
-    from datasets import load_dataset
-
-    ds = load_dataset("HuggingFaceH4/mt_bench_prompts", split="train")
-    rows = []
-    for item in ds:
-        rows.append(
-            {
-                "sample_id": str(item["prompt_id"]),
-                "category": item["category"],
-                "turns": item["prompt"],
-                "reference": item["reference"],
-            }
-        )
-    return rows
-
-
-def load_humaneval() -> list[dict[str, Any]]:
-    from datasets import load_dataset
-
-    ds = load_dataset("openai/openai_humaneval", split="test")
-    rows = []
-    for item in ds:
-        rows.append(
-            {
-                "sample_id": item["task_id"],
-                "task_id": item["task_id"],
-                "prompt": item["prompt"],
-                "entry_point": item["entry_point"],
-                "test": item["test"],
-                "canonical_solution": item["canonical_solution"],
-            }
-        )
-    return rows
-
-
-def load_ceval() -> list[dict[str, Any]]:
-    from datasets import get_dataset_config_names, load_dataset
-
-    rows = []
-    for subject in get_dataset_config_names("ceval/ceval-exam"):
-        ds = load_dataset("ceval/ceval-exam", name=subject, split="val")
-        for item in ds:
-            rows.append(
-                {
-                    "sample_id": f"{subject}:{item['id']}",
-                    "subject": subject,
-                    "question": item["question"],
-                    "choices": {
-                        "A": item["A"],
-                        "B": item["B"],
-                        "C": item["C"],
-                        "D": item["D"],
-                    },
-                    "gold_answer": item["answer"],
-                    "explanation": item.get("explanation", ""),
-                }
-            )
-    return rows
-
-
-def ensure_cmmlu_repo(cmmlu_repo: Path) -> Path:
-    if cmmlu_repo.exists():
-        return cmmlu_repo
-
-    cmmlu_repo.parent.mkdir(parents=True, exist_ok=True)
-    cmd = (
-        f"export http_proxy={DEFAULT_PROXY} && "
-        f"export https_proxy={DEFAULT_PROXY} && "
-        f"git clone --depth 1 https://github.com/haonan-li/CMMLU.git {cmmlu_repo} && "
-        "unset http_proxy && unset https_proxy"
-    )
-    run_shell(cmd)
-    return cmmlu_repo
-
-
-def load_cmmlu(cmmlu_repo: Path) -> list[dict[str, Any]]:
-    cmmlu_repo = ensure_cmmlu_repo(cmmlu_repo)
-    rows = []
-    for csv_path in sorted((cmmlu_repo / "data" / "test").glob("*.csv")):
-        subject = csv_path.stem
-        with csv_path.open("r", encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row_idx, item in enumerate(reader):
-                qid = (
-                    item.get("Unnamed: 0")
-                    or item.get("")
-                    or item.get("id")
-                    or item.get("ID")
-                    or str(row_idx)
-                )
-                question = item.get("Question") or item.get("question")
-                answer = item.get("Answer") or item.get("answer")
-                rows.append(
-                    {
-                        "sample_id": f"{subject}:{qid}",
-                        "subject": subject,
-                        "question": question,
-                        "choices": {
-                            "A": item["A"],
-                            "B": item["B"],
-                            "C": item["C"],
-                            "D": item["D"],
-                        },
-                        "gold_answer": answer,
-                    }
-                )
-    return rows
 
 
 def build_prompt_messages(dataset_name: str, sample: dict[str, Any]) -> list[dict[str, str]]:
@@ -1032,7 +835,7 @@ def evaluate_model_sglang(
     missing = [str(path) for path in sample_paths.values() if not path.exists()]
     if missing:
         raise FileNotFoundError(
-            "Missing prepared sample files. Run `prepare-data` first. Missing: "
+            "Missing prepared sample files. Run `python -m eval.prepare_data` first. Missing: "
             + ", ".join(missing)
         )
     try:
@@ -1243,7 +1046,7 @@ def evaluate_model_vllm(
     missing = [str(path) for path in sample_paths.values() if not path.exists()]
     if missing:
         raise FileNotFoundError(
-            "Missing prepared sample files. Run `prepare-data` first. Missing: "
+            "Missing prepared sample files. Run `python -m eval.prepare_data` first. Missing: "
             + ", ".join(missing)
         )
 
@@ -1432,35 +1235,6 @@ def write_markdown_summary(results: list[dict[str, Any]], path: Path) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def download_models(selected_models: list[str]) -> None:
-    ensure_dirs()
-    hfd = DEFAULT_HF_HOME / "hfd.sh"
-    if not hfd.exists():
-        raise FileNotFoundError(f"Missing downloader: {hfd}")
-
-    env = hf_env()
-    for spec in model_specs(selected_models):
-        for repo_id in [spec.base_repo_id, spec.draft_repo_id]:
-            local_dir = DEFAULT_HF_HOME / repo_leaf(repo_id)
-            cmd = f"cd {DEFAULT_HF_HOME} && bash {hfd} {repo_id} --local-dir {local_dir}"
-            run_shell(cmd, env=env)
-
-
-def smoke_test(cmmlu_repo: Path, sample_size: int, seed: int, dataset_names: list[str]) -> None:
-    paths = prepare_datasets(
-        sample_size=sample_size,
-        seed=seed,
-        cmmlu_repo=cmmlu_repo,
-        dataset_names=dataset_names,
-    )
-    summary = {}
-    for name, path in paths.items():
-        rows = read_jsonl(path)
-        summary[name] = {"count": len(rows), "first_sample_id": rows[0]["sample_id"]}
-    json_dump(REPORTS_DIR / "smoke_summary.json", summary)
-    print(json.dumps(summary, ensure_ascii=False, indent=2))
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="EAGLE-3 benchmark harness")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1470,15 +1244,6 @@ def parse_args() -> argparse.Namespace:
     common.add_argument("--seed", type=int, default=DEFAULT_SEED)
     common.add_argument("--cmmlu-repo", type=Path, default=DEFAULT_CMMLU_REPO)
     common.add_argument("--datasets", nargs="*", default=DATASET_NAMES, choices=DATASET_NAMES)
-    common.add_argument("--force-resample", action="store_true")
-
-    p_download = sub.add_parser("download-models")
-    p_download.add_argument("--models", nargs="*", default=list(MODEL_REGISTRY))
-
-    p_cmmlu = sub.add_parser("download-cmmlu")
-    p_cmmlu.add_argument("--cmmlu-repo", type=Path, default=DEFAULT_CMMLU_REPO)
-
-    p_prepare = sub.add_parser("prepare-data", parents=[common])
 
     p_run = sub.add_parser("run", parents=[common])
     p_run.add_argument("--models", nargs="*", default=list(MODEL_REGISTRY))
@@ -1488,8 +1253,6 @@ def parse_args() -> argparse.Namespace:
     p_run_model.add_argument("--model", required=True, choices=list(MODEL_REGISTRY))
     p_run_model.add_argument("--gpu", required=True, type=int)
 
-    p_smoke = sub.add_parser("smoke", parents=[common])
-
     return parser.parse_args()
 
 
@@ -1497,32 +1260,7 @@ def main() -> None:
     args = parse_args()
     ensure_dirs()
 
-    if args.command == "download-models":
-        download_models(args.models)
-        return
-
-    if args.command == "download-cmmlu":
-        ensure_cmmlu_repo(args.cmmlu_repo)
-        return
-
-    if args.command == "prepare-data":
-        prepare_datasets(
-            args.sample_size,
-            args.seed,
-            args.cmmlu_repo,
-            args.datasets,
-            force=args.force_resample,
-        )
-        return
-
     if args.command == "run":
-        prepare_datasets(
-            args.sample_size,
-            args.seed,
-            args.cmmlu_repo,
-            args.datasets,
-            force=False,
-        )
         orchestrate_run(
             args.models,
             args.gpus,
@@ -1542,10 +1280,6 @@ def main() -> None:
             str(args.cmmlu_repo),
             args.datasets,
         )
-        return
-
-    if args.command == "smoke":
-        smoke_test(args.cmmlu_repo, args.sample_size, args.seed, args.datasets)
         return
 
 
