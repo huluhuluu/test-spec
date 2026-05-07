@@ -2,7 +2,7 @@
 
 This repository evaluates EAGLE-3 draft models across reasoning, coding, chat, and Chinese exam benchmarks. The main entry point is [`run_eval.py`](run_eval.py), which handles dataset sampling, backend dispatch, speculative-decoding trace collection, scoring, and report generation.
 
-The harness requires model weights, one `SGLang` environment, one `vLLM` environment, one `AngelSlim` Eagle3 environment, the `CMMLU` submodule, and the `AngelSlim` submodule.
+The harness requires model weights, one `SGLang` environment, one `vLLM` environment, one `AngelSlim` Eagle3 environment, and the `CMMLU` submodule.
 
 ## 1.1 Quick Start
 
@@ -13,9 +13,8 @@ The harness requires model weights, one `SGLang` environment, one `vLLM` environ
 git clone --recursive https://github.com/huluhuluu/test-spec.git
 cd test-spec
 
-# Initialize required submodules.
+# Initialize the required CMMLU submodule.
 git submodule update --init --recursive --depth 1 third_party/CMMLU
-git submodule update --init --recursive --depth 1 third_party/AngelSlim
 ```
 
 ### 1.1.2 Environment
@@ -53,10 +52,13 @@ This benchmark uses three Python environments because `SGLang`, `vLLM`, and `Ang
   conda create -y -n eagle3-angelslim-bench python=3.11
   conda activate eagle3-angelslim-bench
 
-  # Install AngelSlim plus the packages used by data preparation and scoring.
+  # Install the published AngelSlim package plus the packages used by data preparation and scoring.
   export UV_DEFAULT_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
-  uv pip install transformers sympy antlr4-python3-runtime pyarrow datasets accelerate threadpoolctl shortuuid safetensors huggingface_hub
-  uv pip install -e third_party/AngelSlim
+  uv pip install \
+    "angelslim==0.3.0" \
+    "transformers==4.57.1" \
+    "huggingface_hub<1" \
+    sympy antlr4-python3-runtime pyarrow datasets accelerate threadpoolctl shortuuid safetensors
   ```
 
 ### 1.1.3 Configure Paths
@@ -116,7 +118,6 @@ python run_eval.py run --sample-size 80 --gpus 0 1 2 3
 │   ├── download_datasets.sh
 │   ├── download_models.sh
 ├── third_party/
-│   ├── AngelSlim/
 │   └── CMMLU/
 └── artifacts/
     ├── samples/
@@ -134,7 +135,6 @@ python run_eval.py run --sample-size 80 --gpus 0 1 2 3
 | [`run_eval.py`](run_eval.py) | Evaluation scheduler, backend dispatch, scoring, and reporting |
 | [`scripts/download_models.sh`](scripts/download_models.sh) | Model download entry point using `hfd.sh` and paths from [`eval/config.json`](eval/config.json) |
 | [`scripts/download_datasets.sh`](scripts/download_datasets.sh) | Dataset download entry point using `hfd.sh --dataset` and paths from [`eval/config.json`](eval/config.json) |
-| `third_party/AngelSlim/` | AngelSlim submodule used by the Hunyuan Eagle3 backend |
 | `third_party/CMMLU/` | CMMLU submodule used by the `cmmlu` dataset loader |
 | `artifacts/samples/` | Sampled benchmark inputs |
 | `artifacts/logs/` | Per-model and per-dataset result logs |

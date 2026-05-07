@@ -1,9 +1,3 @@
 [submodule "third_party/CMMLU"]
 	path = third_party/CMMLU
 	url = https://github.com/haonan-li/CMMLU.git
-[submodule "third_party/AngelSlim"]
-	path = third_party/AngelSlim
-	url = https://github.com/Tencent/AngelSlim.git
-[submodule "third_party/SpecForge"]
-	path = third_party/SpecForge
-	url = https://github.com/huluhuluu/SpecForge.git

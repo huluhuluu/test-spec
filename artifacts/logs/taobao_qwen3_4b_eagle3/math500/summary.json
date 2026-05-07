@@ -3,18 +3,9 @@
   "dataset": "math500",
   "sample_count": 80,
   "scored_count": 80,
-  "mean_score": 0.3125,
+  "mean_score": 0.0375,
   "metric_name": "math_equiv",
-  "mean_request_accept_length": 4.394828459386423,
-  "accept_length_histogram": {
-    "0": 819,
-    "1": 1175,
-    "2": 1186,
-    "3": 1000,
-    "4": 716,
-    "5": 517,
-    "6": 404,
-    "7": 1145
-  },
-  "spec_trace_event_count": 6962
+  "mean_request_accept_length": 3.8384395159859976,
+  "accept_length_histogram": {},
+  "spec_trace_event_count": 0
 }
