@@ -26,8 +26,8 @@ MODELS=(
   "Zjcxy-SmartAI/Eagle3-Qwen3-4B-Instruct-2507-zh"
   "tencent/Hunyuan-1.8B-Instruct"
   "AngelSlim/Hunyuan-1.8B-Instruct_eagle3"
-  "tencent/Hunyuan-4B-Instruct"
-  "AngelSlim/Hunyuan-4B-Instruct_eagle3"
+  # "tencent/Hunyuan-4B-Instruct"
+  # "AngelSlim/Hunyuan-4B-Instruct_eagle3"
 )
 
 if [[ ! -f "$HFD" ]]; then

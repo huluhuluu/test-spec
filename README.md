@@ -150,6 +150,7 @@ python run_eval.py run --sample-size 80 --gpus 0 1 2 3
 | `zjcxy_qwen3_4b_eagle3_zh` | [`SGLang`](https://github.com/sgl-project/sglang) | [`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | [`Zjcxy-SmartAI/Eagle3-Qwen3-4B-Instruct-2507-zh`](https://huggingface.co/Zjcxy-SmartAI/Eagle3-Qwen3-4B-Instruct-2507-zh) |
 | `hunyuan_1p8b_eagle3` | [`AngelSlim`](https://github.com/tencent/AngelSlim) | [`tencent/Hunyuan-1.8B-Instruct`](https://huggingface.co/tencent/Hunyuan-1.8B-Instruct) | [`AngelSlim/Hunyuan-1.8B-Instruct_eagle3`](https://huggingface.co/AngelSlim/Hunyuan-1.8B-Instruct_eagle3) |
 | `hunyuan_4b_eagle3` | [`AngelSlim`](https://github.com/tencent/AngelSlim) | [`tencent/Hunyuan-4B-Instruct`](https://huggingface.co/tencent/Hunyuan-4B-Instruct) | [`AngelSlim/Hunyuan-4B-Instruct_eagle3`](https://huggingface.co/AngelSlim/Hunyuan-4B-Instruct_eagle3) |
+| `qwen3_1p7b_sw64_specforge_native` | [`SpecForge`](https://github.com/huluhuluu/SpecForge) native sliding-window | Local `Qwen/Qwen3-1.7B` path | Local sliding-window checkpoint path |
 
 
 
@@ -216,6 +217,14 @@ conda activate eagle3-vllm-bench
 conda activate eagle3-angelslim-bench
 ```
 
+- `SpecForge native sliding-window` models:
+  - `qwen3_1p7b_sw64_specforge_native`
+
+```bash
+# Activate the SpecForge environment before running SpecForge-native models.
+conda activate test-spec
+```
+
 Run different model in separate commands under their corresponding environments.
 
 ### 1.5.3 Run SGLang Models
@@ -254,7 +263,22 @@ python run_eval.py run \
   --datasets gsm8k math500 humaneval mtbench
 ```
 
-### 1.5.6 Sequential Scheduling Behavior
+### 1.5.6 Run SpecForge Native Sliding-Window Models
+
+```bash
+# Run the local sliding-window SpecForge checkpoint on GPUs 4,5.
+conda activate test-spec
+python run_eval.py run-model \
+  --model qwen3_1p7b_sw64_specforge_native \
+  --gpus 4 5 \
+  --datasets gsm8k
+```
+
+The native runner reads `training_state.pt` from the draft checkpoint and reuses the
+checkpoint's recorded `sglang` target backend, draft `attention_backend`, `ttt_length`,
+and `sliding_window` settings.
+
+### 1.5.7 Sequential Scheduling Behavior
 
 `run` mode executes models sequentially in the order given by `--models`.
 
@@ -276,7 +300,7 @@ means:
 1. Run `taobao_qwen3_4b_eagle3` on GPUs `2,3,4,5`.
 2. After it finishes, run `zjcxy_qwen3_4b_eagle3_zh` on GPUs `2,3,4,5`.
 
-### 1.5.7 Common Arguments
+### 1.5.8 Common Arguments
 
 | Argument | Description |
 | --- | --- |
@@ -287,7 +311,7 @@ means:
 | `--seed` | Random seed used when sampling evaluation inputs. |
 | `--cmmlu-repo` | Optional override for the local `CMMLU` repository path. |
 
-### 1.5.8 Outputs
+### 1.5.9 Outputs
 
 After a run finishes, check:
 

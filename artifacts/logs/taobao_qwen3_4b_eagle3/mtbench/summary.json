@@ -5,7 +5,16 @@
   "scored_count": 0,
   "mean_score": null,
   "metric_name": "generation_only",
-  "mean_request_accept_length": 3.337001525953327,
-  "accept_length_histogram": {},
+  "mean_request_accept_length": 2.379439438644556,
+  "accept_length_histogram": {
+    "0": 1296,
+    "1": 1597,
+    "2": 1570,
+    "3": 949,
+    "4": 530,
+    "5": 334,
+    "6": 156,
+    "7": 370
+  },
   "spec_trace_event_count": 0
 }

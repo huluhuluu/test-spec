@@ -27,6 +27,7 @@ SAMPLES_DIR = ARTIFACTS / "samples"
 LOGS_DIR = ARTIFACTS / "logs"
 REPORTS_DIR = ARTIFACTS / "reports"
 DEFAULT_HF_HOME = MODEL_PATH.expanduser()
+TRACE_CONTEXT_WINDOW = 16
 
 SPEC_NUM_STEPS = 7
 SPEC_EAGLE_TOPK = 10
@@ -43,17 +44,23 @@ DEFAULT_SEED = 20260429
 BACKEND_SGLANG = "specforge_sglang"
 BACKEND_VLLM = "angelslim_vllm"
 BACKEND_ANGELSLIM_EAGLE3 = "angelslim_eagle3"
+BACKEND_SPECFORGE_NATIVE = "specforge_native"
 SGLANG_PYTHON_BIN = os.environ.get("SGLANG_PYTHON_BIN")
 VLLM_PYTHON_BIN = os.environ.get("VLLM_PYTHON_BIN")
 ANGELSLIM_PYTHON_BIN = os.environ.get("ANGELSLIM_PYTHON_BIN")
+SPECFORGE_PYTHON_BIN = os.environ.get("SPECFORGE_PYTHON_BIN")
 SGLANG_CONDA_ENV = os.environ.get("SGLANG_CONDA_ENV", "eagle3-sglang-bench")
 VLLM_CONDA_ENV = os.environ.get("VLLM_CONDA_ENV", "eagle3-vllm-bench")
 ANGELSLIM_CONDA_ENV = os.environ.get("ANGELSLIM_CONDA_ENV", "eagle3-angelslim-bench")
+SPECFORGE_CONDA_ENV = os.environ.get("SPECFORGE_CONDA_ENV", "test-spec")
 
 NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 BOXED_RE = re.compile(r"\\boxed\{(.+?)\}")
 LETTER_RE = re.compile(r"\b([A-D])\b", re.IGNORECASE)
 CODE_BLOCK_RE = re.compile(r"```(?:python)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
+CODE_LINE_RE = re.compile(
+    r"^\s*(def |class |from |import |@|return\b|if\b|elif\b|else:|for\b|while\b|try:|except\b|with\b|assert\b|pass\b|break\b|continue\b|raise\b|[A-Za-z_][A-Za-z0-9_]*\s*=)"
+)
 
 MODEL_REGISTRY = {
     "qwen3_1p7b_eagle3": {
@@ -62,12 +69,12 @@ MODEL_REGISTRY = {
         "base_repo_id": "Qwen/Qwen3-1.7B",
         "backend": BACKEND_VLLM,
     },
-    "qwen3_4b_eagle3": {
-        "display_name": "AngelSlim/Qwen3-4B_eagle3",
-        "draft_repo_id": "AngelSlim/Qwen3-4B_eagle3",
-        "base_repo_id": "Qwen/Qwen3-4B",
-        "backend": BACKEND_VLLM,
-    },
+    # "qwen3_4b_eagle3": {
+    #     "display_name": "AngelSlim/Qwen3-4B_eagle3",
+    #     "draft_repo_id": "AngelSlim/Qwen3-4B_eagle3",
+    #     "base_repo_id": "Qwen/Qwen3-4B",
+    #     "backend": BACKEND_VLLM,
+    # },
     "taobao_qwen3_4b_eagle3": {
         "display_name": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3",
         "draft_repo_id": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3",
@@ -86,13 +93,38 @@ MODEL_REGISTRY = {
         "base_repo_id": "tencent/Hunyuan-1.8B-Instruct",
         "backend": BACKEND_ANGELSLIM_EAGLE3,
     },
-    "hunyuan_4b_eagle3": {
-        "display_name": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
-        "draft_repo_id": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
-        "base_repo_id": "tencent/Hunyuan-4B-Instruct",
-        "backend": BACKEND_ANGELSLIM_EAGLE3,
+    # "hunyuan_4b_eagle3": {
+    #     "display_name": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
+    #     "draft_repo_id": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
+    #     "base_repo_id": "tencent/Hunyuan-4B-Instruct",
+    #     "backend": BACKEND_ANGELSLIM_EAGLE3,
+    # },
+    "qwen3_1p7b_sw64_specforge_native": {
+        "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
+        "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SPECFORGE_NATIVE,
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw64/epoch_9_step_233900",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B",
+    },
+    "qwen3_1p7b_sw256_specforge_native": {
+        "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw256",
+        "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw256",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SPECFORGE_NATIVE,
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw256/epoch_9_step_233900",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B",
     },
 }
+
+DEFAULT_MODEL_KEYS = [
+    "qwen3_1p7b_eagle3",
+    "qwen3_4b_eagle3",
+    "taobao_qwen3_4b_eagle3",
+    "zjcxy_qwen3_4b_eagle3_zh",
+    "hunyuan_1p8b_eagle3",
+    "hunyuan_4b_eagle3",
+]
 
 def conda_python_bin(env_name: str) -> Optional[str]:
     if not shutil.which("conda"):
@@ -114,6 +146,8 @@ def backend_python_bin(backend: str) -> Optional[str]:
         return VLLM_PYTHON_BIN or conda_python_bin(VLLM_CONDA_ENV)
     if backend == BACKEND_ANGELSLIM_EAGLE3:
         return ANGELSLIM_PYTHON_BIN or conda_python_bin(ANGELSLIM_CONDA_ENV) or sys.executable
+    if backend == BACKEND_SPECFORGE_NATIVE:
+        return SPECFORGE_PYTHON_BIN or conda_python_bin(SPECFORGE_CONDA_ENV) or sys.executable
     return SGLANG_PYTHON_BIN or conda_python_bin(SGLANG_CONDA_ENV) or sys.executable
 
 
@@ -124,13 +158,19 @@ class ModelSpec:
     draft_repo_id: str
     base_repo_id: str
     backend: str
+    draft_model_path: Optional[str] = None
+    base_model_path: Optional[str] = None
 
     @property
     def draft_local_dir(self) -> Path:
+        if self.draft_model_path is not None:
+            return Path(self.draft_model_path)
         return DEFAULT_HF_HOME / repo_leaf(self.draft_repo_id)
 
     @property
     def base_local_dir(self) -> Path:
+        if self.base_model_path is not None:
+            return Path(self.base_model_path)
         return DEFAULT_HF_HOME / repo_leaf(self.base_repo_id)
 
     @property
@@ -143,6 +183,9 @@ class ModelSpec:
             elif self.backend == BACKEND_ANGELSLIM_EAGLE3:
                 env_name = ANGELSLIM_CONDA_ENV
                 env_var = "ANGELSLIM_PYTHON_BIN"
+            elif self.backend == BACKEND_SPECFORGE_NATIVE:
+                env_name = SPECFORGE_CONDA_ENV
+                env_var = "SPECFORGE_PYTHON_BIN"
             else:
                 env_name = SGLANG_CONDA_ENV
                 env_var = "SGLANG_PYTHON_BIN"
@@ -197,6 +240,149 @@ def safe_name(text: str) -> str:
 
 def format_gpu_ids(gpu_ids: list[int]) -> str:
     return ",".join(str(gpu_id) for gpu_id in gpu_ids)
+
+
+def prepend_pythonpath(path: Path) -> None:
+    current = os.environ.get("PYTHONPATH", "")
+    parts = [part for part in current.split(os.pathsep) if part]
+    root = str(path)
+    if root in parts:
+        return
+    os.environ["PYTHONPATH"] = root if not current else f"{root}{os.pathsep}{current}"
+
+
+def decode_token_pieces(tokenizer: Any, token_ids: list[int]) -> list[str]:
+    pieces = []
+    for token_id in token_ids:
+        try:
+            pieces.append(
+                tokenizer.decode(
+                    [int(token_id)],
+                    clean_up_tokenization_spaces=False,
+                    skip_special_tokens=False,
+                )
+            )
+        except Exception:
+            pieces.append(f"<decode_error:{token_id}>")
+    return pieces
+
+
+def decode_token_text(tokenizer: Any, token_ids: list[int]) -> str:
+    if not token_ids:
+        return ""
+    try:
+        return tokenizer.decode(
+            token_ids,
+            clean_up_tokenization_spaces=False,
+            skip_special_tokens=False,
+        )
+    except Exception:
+        return ""
+
+
+def mean_accept_length(accept_lengths: list[int]) -> float:
+    return (sum(accept_lengths) / len(accept_lengths)) if accept_lengths else 0.0
+
+
+def accept_length_histogram(accept_lengths: list[int]) -> dict[str, int]:
+    histogram = Counter(int(length) for length in accept_lengths)
+    return {str(k): histogram[k] for k in sorted(histogram)}
+
+
+def histogram_from_sglang_meta(meta_info: dict[str, Any]) -> dict[str, int]:
+    raw = meta_info.get("spec_accept_histogram")
+    if not isinstance(raw, list):
+        return {}
+    histogram = {str(idx): int(count) for idx, count in enumerate(raw) if int(count) > 0}
+    return histogram
+
+
+def normalize_sglang_meta_info(meta_info: dict[str, Any]) -> dict[str, Any]:
+    meta = dict(meta_info)
+    histogram = histogram_from_sglang_meta(meta)
+    if histogram:
+        total_steps = sum(histogram.values())
+        accepted_tokens = sum(int(length) * count for length, count in ((int(k), v) for k, v in histogram.items()))
+        meta["accept_length_histogram"] = histogram
+        meta["spec_verify_ct"] = total_steps
+        meta["spec_accept_length"] = (accepted_tokens / total_steps) if total_steps > 0 else 0.0
+    return meta
+
+
+def build_trace_stats(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
+    accept_lengths = [int(ev["accept_len"]) for ev in trace_events if ev.get("accept_len") is not None]
+    total_draft_tokens = 0
+    for ev in trace_events:
+        total_draft_tokens += len(ev.get("draft_chunk_token_ids") or [])
+    return {
+        "spec_accept_length": mean_accept_length(accept_lengths),
+        "spec_accept_rate": (
+            (sum(accept_lengths) / total_draft_tokens) if total_draft_tokens > 0 else None
+        ),
+        "spec_verify_ct": len(accept_lengths),
+        "accept_length_histogram": accept_length_histogram(accept_lengths),
+    }
+
+
+def build_trace_event(
+    *,
+    rid: str,
+    backend: str,
+    tokenizer: Any,
+    prefix_token_ids: list[int],
+    draft_chunk_token_ids: list[int],
+    accept_len: int,
+    committed_token_ids: list[int],
+    step_index: int,
+    turn_index: Optional[int] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    prefix_tail = prefix_token_ids[-TRACE_CONTEXT_WINDOW:]
+    accepted_token_ids = draft_chunk_token_ids[:accept_len]
+    rejected_candidate_token_ids = (
+        draft_chunk_token_ids[accept_len:] if accept_len < len(draft_chunk_token_ids) else []
+    )
+    replacement_token_id = (
+        committed_token_ids[accept_len] if len(committed_token_ids) > accept_len else None
+    )
+    event = {
+        "rid": rid,
+        "backend": backend,
+        "step_index": step_index,
+        "turn_index": turn_index,
+        "accept_len": accept_len,
+        "prefix_token_ids": prefix_tail,
+        "prefix_tokens": decode_token_pieces(tokenizer, prefix_tail),
+        "prefix_text": decode_token_text(tokenizer, prefix_tail),
+        "draft_chunk_token_ids": draft_chunk_token_ids,
+        "draft_chunk_tokens": decode_token_pieces(tokenizer, draft_chunk_token_ids),
+        "accepted_token_ids": accepted_token_ids,
+        "accepted_tokens": decode_token_pieces(tokenizer, accepted_token_ids),
+        "rejected_candidate_token_ids": rejected_candidate_token_ids,
+        "rejected_candidate_tokens": decode_token_pieces(tokenizer, rejected_candidate_token_ids),
+        "committed_token_ids": committed_token_ids,
+        "committed_tokens": decode_token_pieces(tokenizer, committed_token_ids),
+        "committed_text": decode_token_text(tokenizer, committed_token_ids),
+        "replacement_token_id": replacement_token_id,
+        "replacement_token": (
+            decode_token_pieces(tokenizer, [replacement_token_id])[0]
+            if replacement_token_id is not None
+            else None
+        ),
+    }
+    if extra:
+        event.update(extra)
+    return event
+
+
+def read_jsonl_new_entries(path: Path, start_offset: int) -> tuple[list[dict[str, Any]], int]:
+    if not path.exists():
+        return [], 0
+    with path.open("r", encoding="utf-8") as f:
+        f.seek(start_offset)
+        rows = [json.loads(line) for line in f if line.strip()]
+        end_offset = f.tell()
+    return rows, end_offset
 
 
 def load_angelslim_eagle3_model_class() -> Any:
@@ -453,24 +639,34 @@ def install_trace_patch(tokenizer: Any, trace_path: Path) -> None:
     if getattr(sopm, "_eagle3_trace_patched", False):
         sopm._eagle3_trace_tokenizer = tokenizer
         sopm._eagle3_trace_path = trace_path
+        sopm._eagle3_trace_step_counts = {}
         return
 
     original = sopm.SchedulerOutputProcessorMixin._resolve_spec_overlap_token_ids
 
-    def decode_tokens(token_ids: list[int]) -> list[str]:
-        items = []
-        for token_id in token_ids:
-            try:
-                items.append(
-                    tokenizer.decode(
-                        [token_id],
-                        clean_up_tokenization_spaces=False,
-                        skip_special_tokens=False,
-                    )
-                )
-            except Exception:
-                items.append(f"<decode_error:{token_id}>")
-        return items
+    def request_prefix_token_ids(req: Any) -> list[int]:
+        prefix: list[int] = []
+        for attr in ("origin_input_ids", "input_ids", "prompt_token_ids"):
+            value = getattr(req, attr, None)
+            if value is not None:
+                try:
+                    items = value.tolist() if hasattr(value, "tolist") else list(value)
+                except TypeError:
+                    items = []
+                if items:
+                    prefix.extend(int(token_id) for token_id in items)
+                    break
+        for attr in ("output_ids", "decoded_ids", "output_token_ids"):
+            value = getattr(req, attr, None)
+            if value is not None:
+                try:
+                    items = value.tolist() if hasattr(value, "tolist") else list(value)
+                except TypeError:
+                    items = []
+                if items:
+                    prefix.extend(int(token_id) for token_id in items)
+                    break
+        return prefix
 
     def wrapped(self, result, batch):
         predict_tokens = original(self, result, batch)
@@ -484,19 +680,23 @@ def install_trace_patch(tokenizer: Any, trace_path: Path) -> None:
             for i, req in enumerate(batch.reqs):
                 chunk = next_token_ids[i * stride : (i + 1) * stride]
                 accept_len = int(accept_lens[i])
-                accepted = chunk[:accept_len]
-                rejected = chunk[accept_len:]
-                event = {
-                    "ts": time.time(),
-                    "rid": req.rid,
-                    "accept_len": accept_len,
-                    "accepted_token_ids": accepted,
-                    "accepted_tokens": decode_tokens(accepted),
-                    "rejected_candidate_token_ids": rejected,
-                    "rejected_candidate_tokens": decode_tokens(rejected),
-                    "draft_chunk_token_ids": chunk,
-                    "draft_chunk_tokens": decode_tokens(chunk),
-                }
+                rid = req.rid
+                step_counts = getattr(sopm, "_eagle3_trace_step_counts", {})
+                step_index = int(step_counts.get(rid, 0)) + 1
+                step_counts[rid] = step_index
+                sopm._eagle3_trace_step_counts = step_counts
+                committed = chunk[: min(len(chunk), accept_len + 1)]
+                event = build_trace_event(
+                    rid=rid,
+                    backend=BACKEND_SGLANG,
+                    tokenizer=tokenizer,
+                    prefix_token_ids=request_prefix_token_ids(req),
+                    draft_chunk_token_ids=[int(token_id) for token_id in chunk],
+                    accept_len=accept_len,
+                    committed_token_ids=[int(token_id) for token_id in committed],
+                    step_index=step_index,
+                    extra={"ts": time.time()},
+                )
                 fh.write(json.dumps(event, ensure_ascii=False) + "\n")
         return predict_tokens
 
@@ -504,6 +704,7 @@ def install_trace_patch(tokenizer: Any, trace_path: Path) -> None:
     sopm._eagle3_trace_patched = True
     sopm._eagle3_trace_tokenizer = tokenizer
     sopm._eagle3_trace_path = trace_path
+    sopm._eagle3_trace_step_counts = {}
 
 
 def render_chat_prompt(tokenizer: Any, messages: list[dict[str, str]]) -> str:
@@ -636,15 +837,43 @@ def extract_code_completion(text: str) -> str:
     match = CODE_BLOCK_RE.search(text)
     if match:
         return match.group(1).strip("\n")
-    return text.strip()
+    sanitized = text.replace("<answer>", "").replace("</answer>", "").strip()
+    lines = sanitized.splitlines()
+    code_lines: list[str] = []
+    started = False
+    for line in lines:
+        stripped = line.strip()
+        is_code = (
+            not stripped
+            or line.startswith((" ", "\t"))
+            or bool(CODE_LINE_RE.match(line))
+        )
+        if not started:
+            if is_code and stripped:
+                started = True
+                code_lines.append(line)
+            continue
+        if is_code:
+            code_lines.append(line)
+            continue
+        if code_lines and not code_lines[-1].strip():
+            break
+        if code_lines:
+            break
+    if code_lines:
+        return "\n".join(code_lines).strip("\n")
+    return sanitized
 
 
 def worker_run_humaneval(program: str, entry_point: str, test: str, timeout: int, result_path: Path) -> None:
-    namespace: dict[str, Any] = {}
-    exec(program, namespace)
-    exec(test, namespace)
-    namespace["check"](namespace[entry_point])
-    result_path.write_text("pass", encoding="utf-8")
+    try:
+        namespace: dict[str, Any] = {}
+        exec(program, namespace)
+        exec(test, namespace)
+        namespace["check"](namespace[entry_point])
+        result_path.write_text("pass", encoding="utf-8")
+    except Exception as exc:
+        result_path.write_text(f"fail:{type(exc).__name__}:{exc}", encoding="utf-8")
 
 
 def humaneval_passes(sample: dict[str, Any], completion: str, timeout: int = 10) -> tuple[bool, str]:
@@ -665,8 +894,11 @@ def humaneval_passes(sample: dict[str, Any], completion: str, timeout: int = 10)
             proc.terminate()
             proc.join()
             return False, "timeout"
-        if proc.exitcode == 0 and result_path.exists():
-            return True, "pass"
+        if result_path.exists():
+            result = result_path.read_text(encoding="utf-8").strip() or "empty"
+            if result == "pass":
+                return True, "pass"
+            return False, result
         return False, f"exitcode={proc.exitcode}"
 
 
@@ -746,6 +978,13 @@ def summarise_dataset_results(
             histogram[int(ev["accept_len"])] += 1
         elif ev.get("accept_length_histogram"):
             for key, value in ev["accept_length_histogram"].items():
+                histogram[int(key)] += int(value)
+    if not histogram:
+        for row in results:
+            meta_hist = row.get("meta_info", {}).get("accept_length_histogram")
+            if not meta_hist:
+                continue
+            for key, value in meta_hist.items():
                 histogram[int(key)] += int(value)
     summary["accept_length_histogram"] = {str(k): histogram[k] for k in sorted(histogram)}
     summary["spec_trace_event_count"] = len(trace_events)
@@ -865,7 +1104,7 @@ def diff_vllm_metric_snapshots(
         "num_draft_tokens": num_draft_tokens,
         "num_accepted_tokens": num_accepted_tokens,
         "acceptance_counts": pos_counts,
-        "mean_acceptance_length": (1 + (num_accepted_tokens / num_drafts)) if num_drafts > 0 else 1.0,
+        "mean_acceptance_length": (num_accepted_tokens / num_drafts) if num_drafts > 0 else 0.0,
     }
 
 
@@ -874,17 +1113,15 @@ def acceptance_histogram_from_pos_counts(
     pos_counts: list[int],
 ) -> dict[str, int]:
     histogram: dict[str, int] = {}
-    remaining = num_drafts
     prev = num_drafts
     for pos, count in enumerate(pos_counts):
         exact = prev - count
         if exact > 0:
-            histogram[str(pos + 1)] = exact
+            histogram[str(pos)] = exact
         prev = count
-        remaining -= exact
     if prev > 0:
-        histogram[str(len(pos_counts) + 1)] = prev
-    if remaining < 0:
+        histogram[str(len(pos_counts))] = prev
+    if prev < 0:
         raise ValueError(f"Invalid acceptance histogram state: num_drafts={num_drafts}, pos_counts={pos_counts}")
     return histogram
 
@@ -1011,14 +1248,17 @@ def evaluate_model_sglang(
     cmmlu_repo: str,
     dataset_names: list[str],
 ) -> dict[str, Any]:
-    del sample_size, seed, cmmlu_repo
+    del seed, cmmlu_repo
     os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
     os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
     os.environ["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
+    os.environ["EAGLE3_TRACE_BACKEND"] = "sglang"
+    prepend_pythonpath(ROOT)
 
     from transformers import AutoTokenizer
     from sglang.srt.entrypoints.engine import Engine
+    import sitecustomize
 
     model_spec = model_specs([model_key])[0]
     tokenizer = AutoTokenizer.from_pretrained(
@@ -1031,8 +1271,10 @@ def evaluate_model_sglang(
         shutil.rmtree(model_log_dir)
     model_log_dir.mkdir(parents=True, exist_ok=True)
     trace_path = model_log_dir / "spec_trace_raw.jsonl"
-    os.environ["EAGLE3_TRACE_PATH"] = str(trace_path)
     os.environ["EAGLE3_TRACE_TOKENIZER_PATH"] = str(model_spec.base_local_dir)
+    os.environ["EAGLE3_TRACE_PATH"] = str(trace_path)
+    sitecustomize.install_sglang_trace_patch()
+    install_trace_patch(tokenizer, trace_path)
 
     engine = Engine(
         model_path=str(model_spec.base_local_dir),
@@ -1060,7 +1302,7 @@ def evaluate_model_sglang(
         )
     try:
         for dataset_name in dataset_names:
-            dataset_rows = read_jsonl(sample_paths[dataset_name])
+            dataset_rows = read_jsonl(sample_paths[dataset_name])[:sample_size]
             request_ids: set[str] = set()
             result_rows: list[dict[str, Any]] = []
             dataset_dir = model_log_dir / dataset_name
@@ -1087,6 +1329,10 @@ def evaluate_model_sglang(
                     response=response,
                     score=score,
                 )
+                record["meta_info"] = normalize_sglang_meta_info(record["meta_info"])
+                record["spec_accept_length"] = record["meta_info"].get("spec_accept_length")
+                record["spec_accept_rate"] = record["meta_info"].get("spec_accept_rate")
+                record["spec_verify_ct"] = record["meta_info"].get("spec_verify_ct")
                 if dataset_name == "mtbench":
                     record["turns"] = response["turns"]
                 append_jsonl(results_path, record)
@@ -1148,7 +1394,13 @@ def generate_angelslim_eagle3_single(
     tokenizer: Any,
     prompt: str,
     sampling_params_dict: dict[str, Any],
+    *,
+    rid: str,
+    turn_index: Optional[int] = None,
 ) -> dict[str, Any]:
+    eagle3_module = importlib.import_module(
+        "angelslim.compressor.speculative.inference.models.eagle3.eagle3_model"
+    )
     stop_strings = sampling_params_dict.get("stop", [])
     inputs = tokenizer(prompt, return_tensors="pt", add_special_tokens=False)
     input_ids = inputs["input_ids"].cuda()
@@ -1158,15 +1410,76 @@ def generate_angelslim_eagle3_single(
         int(sampling_params_dict["max_tokens"]),
         max(1, EVAL_CONTEXT_LENGTH - prompt_tokens - kv_cache_reserve),
     )
-    output_ids, _, _, accept_length_list = model.eagle_generate(
-        input_ids,
-        temperature=0.0,
-        top_p=1.0,
-        top_k=0.0,
-        max_new_tokens=max_new_tokens,
-        max_length=EVAL_CONTEXT_LENGTH,
-        log=True,
-    )
+    trace_events: list[dict[str, Any]] = []
+    step_index = 0
+    original_update = eagle3_module.update_inference_inputs
+
+    def traced_update_inference_inputs(
+        input_ids: Any,
+        inputs_embeds: Any,
+        candidates: Any,
+        best_candidate: Any,
+        accept_length: Any,
+        retrieve_indices: Any,
+        logits_processor: Any,
+        new_token: Any,
+        past_key_values_data_list: Any,
+        current_length_data: Any,
+        model: Any,
+        hidden_state_new: Any,
+        sample_token: Any,
+    ) -> Any:
+        nonlocal step_index
+        best_idx = int(best_candidate.item() if hasattr(best_candidate, "item") else best_candidate)
+        accept_len = int(accept_length.item() if hasattr(accept_length, "item") else accept_length)
+        prefix_ids = input_ids[0].tolist()
+        draft_chunk = [int(token_id) for token_id in candidates[best_idx].tolist()]
+        while draft_chunk and draft_chunk[-1] < 0:
+            draft_chunk.pop()
+        committed = [int(token_id) for token_id in candidates[best_idx, : accept_len + 1].tolist()]
+        step_index += 1
+        trace_events.append(
+            build_trace_event(
+                rid=rid,
+                backend=BACKEND_ANGELSLIM_EAGLE3,
+                tokenizer=tokenizer,
+                prefix_token_ids=prefix_ids,
+                draft_chunk_token_ids=draft_chunk,
+                accept_len=accept_len,
+                committed_token_ids=committed,
+                step_index=step_index,
+                turn_index=turn_index,
+            )
+        )
+        return original_update(
+            input_ids,
+            inputs_embeds,
+            candidates,
+            best_candidate,
+            accept_length,
+            retrieve_indices,
+            logits_processor,
+            new_token,
+            past_key_values_data_list,
+            current_length_data,
+            model,
+            hidden_state_new,
+            sample_token,
+        )
+
+    eagle3_module.update_inference_inputs = traced_update_inference_inputs
+    try:
+        output_ids, _, _, accept_length_list = model.eagle_generate(
+            input_ids,
+            temperature=0.0,
+            top_p=1.0,
+            top_k=0.0,
+            max_new_tokens=max_new_tokens,
+            max_length=EVAL_CONTEXT_LENGTH,
+            log=True,
+        )
+    finally:
+        eagle3_module.update_inference_inputs = original_update
     generated_ids = output_ids[0][input_ids.shape[1] :]
     text = tokenizer.decode(
         generated_ids,
@@ -1187,20 +1500,27 @@ def generate_angelslim_eagle3_single(
     num_drafts = len(accept_length_list)
     num_accepted_tokens = sum(accept_length_list)
     num_draft_tokens = num_drafts * SPEC_NUM_DRAFT_TOKENS
-    return {
-        "text": text,
-        "token_ids": list(map(int, generated_ids.tolist())),
-        "meta_info": {
-            "spec_accept_length": (1 + (num_accepted_tokens / num_drafts)) if num_drafts else 1.0,
+    trace_meta = build_trace_stats(trace_events)
+    if not trace_events:
+        trace_meta = {
+            "spec_accept_length": mean_accept_length(accept_length_list),
             "spec_accept_rate": (
                 (num_accepted_tokens / num_draft_tokens) if num_draft_tokens > 0 else None
             ),
             "spec_verify_ct": num_drafts,
+            "accept_length_histogram": accept_length_histogram(accept_length_list),
+        }
+    return {
+        "text": text,
+        "token_ids": list(map(int, generated_ids.tolist())),
+        "meta_info": {
+            **trace_meta,
             "angelslim_num_drafts": num_drafts,
             "angelslim_num_draft_tokens": num_draft_tokens,
             "angelslim_num_accepted_tokens": num_accepted_tokens,
         },
         "accept_length_list": accept_length_list,
+        "trace_events": trace_events,
     }
 
 
@@ -1215,7 +1535,7 @@ def build_angelslim_trace_record(rid: str, accept_length_list: list[int]) -> dic
         "num_drafts": num_drafts,
         "num_draft_tokens": num_draft_tokens,
         "num_accepted_tokens": num_accepted_tokens,
-        "mean_acceptance_length": (1 + (num_accepted_tokens / num_drafts)) if num_drafts else 1.0,
+        "mean_acceptance_length": (num_accepted_tokens / num_drafts) if num_drafts else 0.0,
         "acceptance_counts": None,
         "accept_length_histogram": {str(k): histogram[k] for k in sorted(histogram)},
         "accepted_token_ids": None,
@@ -1234,9 +1554,12 @@ def run_vllm_single_sample(
     dataset_name: str,
     sample: dict[str, Any],
     num_spec_tokens: int,
-) -> tuple[dict[str, Any], dict[str, Any]]:
+    trace_path: Path,
+    trace_offset: int,
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], int]:
     rid = f"{dataset_name}::{safe_name(str(sample['sample_id']))}"
     before_metrics = snapshot_vllm_metrics(llm)
+    trace_events: list[dict[str, Any]] = []
 
     if dataset_name == "mtbench":
         messages = [{"role": "system", "content": "You are a helpful assistant."}]
@@ -1250,7 +1573,14 @@ def run_vllm_single_sample(
                 "mtbench",
                 reserve_tokens=MTBENCH_TURN1_HISTORY_RESERVE if turn_index == 0 else 0,
             )
+            start_offset = trace_offset
             output = generate_vllm_single(llm, prompt, sampling_params)
+            sample_trace_events, trace_offset = read_jsonl_new_entries(trace_path, start_offset)
+            for event in sample_trace_events:
+                event["rid"] = rid
+                event["turn_index"] = turn_index + 1
+            trace_events.extend(sample_trace_events)
+            turn_trace_meta = build_trace_stats(sample_trace_events)
             turns.append(
                 {
                     "turn_index": turn_index + 1,
@@ -1259,6 +1589,7 @@ def run_vllm_single_sample(
                     "meta_info": {
                         "prompt_tokens": prompt_tokens,
                         "max_new_tokens": sampling_params["max_tokens"],
+                        **turn_trace_meta,
                     },
                 }
             )
@@ -1266,8 +1597,10 @@ def run_vllm_single_sample(
         after_metrics = snapshot_vllm_metrics(llm)
         delta = diff_vllm_metric_snapshots(before_metrics, after_metrics, num_spec_tokens)
         meta_info = build_vllm_meta_info(delta)
+        if trace_events:
+            meta_info.update(build_trace_stats(trace_events))
         for turn in turns:
-            turn["meta_info"] = {**turn["meta_info"], **meta_info}
+            turn["meta_info"] = {**meta_info, **turn["meta_info"]}
         response = {
             "rid": rid,
             "text": turns[-1]["text"] if turns else "",
@@ -1275,7 +1608,7 @@ def run_vllm_single_sample(
             "meta_info": {**meta_info, **(turns[-1]["meta_info"] if turns else {})},
             "turns": turns,
         }
-        return response, delta
+        return response, delta, trace_events, trace_offset
 
     messages = build_prompt_messages(dataset_name, sample)
     prompt = render_chat_prompt(tokenizer, messages)
@@ -1284,20 +1617,27 @@ def run_vllm_single_sample(
         prompt,
         dataset_name,
     )
+    start_offset = trace_offset
     output = generate_vllm_single(llm, prompt, sampling_params)
+    trace_events, trace_offset = read_jsonl_new_entries(trace_path, start_offset)
+    for event in trace_events:
+        event["rid"] = rid
     after_metrics = snapshot_vllm_metrics(llm)
     delta = diff_vllm_metric_snapshots(before_metrics, after_metrics, num_spec_tokens)
+    meta_info = build_vllm_meta_info(delta)
+    if trace_events:
+        meta_info.update(build_trace_stats(trace_events))
     response = {
         "rid": rid,
         "text": output["text"],
         "token_ids": output["token_ids"],
         "meta_info": {
-            **build_vllm_meta_info(delta),
+            **meta_info,
             "prompt_tokens": prompt_tokens,
             "max_new_tokens": sampling_params["max_tokens"],
         },
     }
-    return response, delta
+    return response, delta, trace_events, trace_offset
 
 
 def evaluate_model_vllm(
@@ -1308,10 +1648,11 @@ def evaluate_model_vllm(
     cmmlu_repo: str,
     dataset_names: list[str],
 ) -> dict[str, Any]:
-    del sample_size, seed, cmmlu_repo
+    del seed, cmmlu_repo
     os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
     os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    prepend_pythonpath(ROOT)
 
     from transformers import AutoTokenizer
     from vllm import LLM
@@ -1326,6 +1667,13 @@ def evaluate_model_vllm(
     if model_log_dir.exists():
         shutil.rmtree(model_log_dir)
     model_log_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = model_log_dir / "spec_trace_raw.jsonl"
+    os.environ["EAGLE3_TRACE_BACKEND"] = "vllm"
+    os.environ["EAGLE3_TRACE_PATH"] = str(trace_path)
+    os.environ["EAGLE3_TRACE_TOKENIZER_PATH"] = str(model_spec.base_local_dir)
+    import sitecustomize
+
+    sitecustomize.install_vllm_trace_patch()
 
     llm = LLM(
         model=str(model_spec.base_local_dir),
@@ -1347,6 +1695,7 @@ def evaluate_model_vllm(
 
     combined_path = model_log_dir / "combined_results.jsonl"
     summaries = []
+    trace_offset = 0
     sample_paths = {name: SAMPLES_DIR / f"{name}.jsonl" for name in dataset_names}
     missing = [str(path) for path in sample_paths.values() if not path.exists()]
     if missing:
@@ -1357,7 +1706,7 @@ def evaluate_model_vllm(
 
     try:
         for dataset_name in dataset_names:
-            dataset_rows = read_jsonl(sample_paths[dataset_name])
+            dataset_rows = read_jsonl(sample_paths[dataset_name])[:sample_size]
             result_rows: list[dict[str, Any]] = []
             trace_events: list[dict[str, Any]] = []
             dataset_dir = model_log_dir / dataset_name
@@ -1367,13 +1716,15 @@ def evaluate_model_vllm(
                 results_path.unlink()
 
             for sample in dataset_rows:
-                response, delta = run_vllm_single_sample(
+                response, delta, sample_trace_events, trace_offset = run_vllm_single_sample(
                     llm=llm,
                     tokenizer=tokenizer,
                     model_spec=model_spec,
                     dataset_name=dataset_name,
                     sample=sample,
                     num_spec_tokens=SPEC_NUM_DRAFT_TOKENS,
+                    trace_path=trace_path,
+                    trace_offset=trace_offset,
                 )
                 if dataset_name == "mtbench":
                     score = {"metric_name": "generation_only", "score": None}
@@ -1394,7 +1745,10 @@ def evaluate_model_vllm(
                 append_jsonl(results_path, record)
                 append_jsonl(combined_path, record)
                 result_rows.append(record)
-                trace_events.append(build_vllm_trace_record(response["rid"], delta))
+                if sample_trace_events:
+                    trace_events.extend(sample_trace_events)
+                else:
+                    trace_events.append(build_vllm_trace_record(response["rid"], delta))
 
             trace_out = dataset_dir / "spec_trace.jsonl"
             with trace_out.open("w", encoding="utf-8") as f:
@@ -1437,7 +1791,7 @@ def evaluate_model_angelslim_eagle3(
     cmmlu_repo: str,
     dataset_names: list[str],
 ) -> dict[str, Any]:
-    del sample_size, seed, cmmlu_repo
+    del seed, cmmlu_repo
     os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
     os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
     os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
@@ -1479,7 +1833,7 @@ def evaluate_model_angelslim_eagle3(
         )
 
     for dataset_name in dataset_names:
-        dataset_rows = read_jsonl(sample_paths[dataset_name])
+        dataset_rows = read_jsonl(sample_paths[dataset_name])[:sample_size]
         result_rows: list[dict[str, Any]] = []
         trace_events: list[dict[str, Any]] = []
         dataset_dir = model_log_dir / dataset_name
@@ -1502,7 +1856,14 @@ def evaluate_model_angelslim_eagle3(
                         "mtbench",
                         reserve_tokens=MTBENCH_TURN1_HISTORY_RESERVE if turn_index == 0 else 0,
                     )
-                    output = generate_angelslim_eagle3_single(model, tokenizer, prompt, sampling_params)
+                    output = generate_angelslim_eagle3_single(
+                        model,
+                        tokenizer,
+                        prompt,
+                        sampling_params,
+                        rid=rid,
+                        turn_index=turn_index + 1,
+                    )
                     turns.append(
                         {
                             "turn_index": turn_index + 1,
@@ -1515,6 +1876,7 @@ def evaluate_model_angelslim_eagle3(
                             },
                         }
                     )
+                    trace_events.extend(output["trace_events"])
                     messages.append({"role": "assistant", "content": output["text"]})
                 response = {
                     "rid": rid,
@@ -1532,7 +1894,13 @@ def evaluate_model_angelslim_eagle3(
                     prompt,
                     dataset_name,
                 )
-                output = generate_angelslim_eagle3_single(model, tokenizer, prompt, sampling_params)
+                output = generate_angelslim_eagle3_single(
+                    model,
+                    tokenizer,
+                    prompt,
+                    sampling_params,
+                    rid=rid,
+                )
                 response = {
                     "rid": rid,
                     "text": output["text"],
@@ -1544,6 +1912,7 @@ def evaluate_model_angelslim_eagle3(
                     },
                 }
                 score = score_sample(dataset_name, sample, response)
+                trace_events.extend(output["trace_events"])
 
             record = build_result_record(
                 model_spec=model_spec,
@@ -1559,10 +1928,6 @@ def evaluate_model_angelslim_eagle3(
             append_jsonl(results_path, record)
             append_jsonl(combined_path, record)
             result_rows.append(record)
-            trace_events.append(
-                build_angelslim_trace_record(rid=response["rid"], accept_length_list=output["accept_length_list"])
-            )
-
         trace_out = dataset_dir / "spec_trace.jsonl"
         with trace_out.open("w", encoding="utf-8") as f:
             for event in trace_events:
@@ -1596,6 +1961,63 @@ def evaluate_model_angelslim_eagle3(
     return final_summary
 
 
+def evaluate_model_specforge_native(
+    model_key: str,
+    gpu_ids: list[int],
+    sample_size: int,
+    seed: int,
+    cmmlu_repo: str,
+    dataset_names: list[str],
+) -> dict[str, Any]:
+    del seed, cmmlu_repo
+    model_spec = model_specs([model_key])[0]
+    model_log_dir = LOGS_DIR / model_spec.key
+    if model_log_dir.exists():
+        shutil.rmtree(model_log_dir)
+    model_log_dir.mkdir(parents=True, exist_ok=True)
+
+    sample_paths = {name: SAMPLES_DIR / f"{name}.jsonl" for name in dataset_names}
+    missing = [str(path) for path in sample_paths.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing prepared sample files. Run `python -m eval.prepare_data` first. Missing: "
+            + ", ".join(missing)
+        )
+
+    env = os.environ.copy()
+    env["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
+    env["HF_HOME"] = str(DEFAULT_HF_HOME)
+    env["HF_ENDPOINT"] = "https://hf-mirror.com"
+
+    cmd = [
+        model_spec.python_bin,
+        str(ROOT / "scripts" / "run_specforge_native_eagle3.py"),
+        "--model-key",
+        model_spec.key,
+        "--model-name",
+        model_spec.display_name,
+        "--target-model-path",
+        str(model_spec.base_local_dir),
+        "--draft-model-path",
+        str(model_spec.draft_local_dir),
+        "--sample-dir",
+        str(SAMPLES_DIR),
+        "--output-dir",
+        str(model_log_dir),
+        "--sample-size",
+        str(sample_size),
+        "--tp-size",
+        str(len(gpu_ids)),
+        "--gpu-ids",
+        *[str(gpu_id) for gpu_id in gpu_ids],
+        "--datasets",
+        *dataset_names,
+        "--trust-remote-code",
+    ]
+    subprocess.run(cmd, check=True, env=env)
+    return json.loads((model_log_dir / "model_summary.json").read_text(encoding="utf-8"))
+
+
 def evaluate_model_current_process(
     model_key: str,
     gpu_ids: list[int],
@@ -1609,6 +2031,15 @@ def evaluate_model_current_process(
         return evaluate_model_vllm(model_key, gpu_ids, sample_size, seed, cmmlu_repo, dataset_names)
     if model_spec.backend == BACKEND_ANGELSLIM_EAGLE3:
         return evaluate_model_angelslim_eagle3(
+            model_key,
+            gpu_ids,
+            sample_size,
+            seed,
+            cmmlu_repo,
+            dataset_names,
+        )
+    if model_spec.backend == BACKEND_SPECFORGE_NATIVE:
+        return evaluate_model_specforge_native(
             model_key,
             gpu_ids,
             sample_size,
@@ -1713,7 +2144,7 @@ def parse_args() -> argparse.Namespace:
     common.add_argument("--datasets", nargs="*", default=DATASET_NAMES, choices=DATASET_NAMES)
 
     p_run = sub.add_parser("run", parents=[common])
-    p_run.add_argument("--models", nargs="*", default=list(MODEL_REGISTRY))
+    p_run.add_argument("--models", nargs="*", default=DEFAULT_MODEL_KEYS)
     p_run.add_argument("--gpus", nargs="*", type=int, default=DEFAULT_GPUS)
 
     p_run_model = sub.add_parser("run-model", parents=[common])
