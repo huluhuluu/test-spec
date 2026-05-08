@@ -150,7 +150,8 @@ python run_eval.py run --sample-size 80 --gpus 0 1 2 3
 | `zjcxy_qwen3_4b_eagle3_zh` | [`SGLang`](https://github.com/sgl-project/sglang) | [`Qwen/Qwen3-4B-Instruct-2507`](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507) | [`Zjcxy-SmartAI/Eagle3-Qwen3-4B-Instruct-2507-zh`](https://huggingface.co/Zjcxy-SmartAI/Eagle3-Qwen3-4B-Instruct-2507-zh) |
 | `hunyuan_1p8b_eagle3` | [`AngelSlim`](https://github.com/tencent/AngelSlim) | [`tencent/Hunyuan-1.8B-Instruct`](https://huggingface.co/tencent/Hunyuan-1.8B-Instruct) | [`AngelSlim/Hunyuan-1.8B-Instruct_eagle3`](https://huggingface.co/AngelSlim/Hunyuan-1.8B-Instruct_eagle3) |
 | `hunyuan_4b_eagle3` | [`AngelSlim`](https://github.com/tencent/AngelSlim) | [`tencent/Hunyuan-4B-Instruct`](https://huggingface.co/tencent/Hunyuan-4B-Instruct) | [`AngelSlim/Hunyuan-4B-Instruct_eagle3`](https://huggingface.co/AngelSlim/Hunyuan-4B-Instruct_eagle3) |
-| `qwen3_1p7b_sw64_specforge_native` | [`SpecForge`](https://github.com/huluhuluu/SpecForge) native sliding-window | Local `Qwen/Qwen3-1.7B` path | Local sliding-window checkpoint path |
+| `qwen3_1p7b_sw64_sglang` | [`SGLang`](https://github.com/sgl-project/sglang) + local sliding-window draft | Local `Qwen/Qwen3-1.7B` path | Local sliding-window checkpoint path |
+| `qwen3_1p7b_sw256_sglang` | [`SGLang`](https://github.com/sgl-project/sglang) + local sliding-window draft | Local `Qwen/Qwen3-1.7B` path | Local sliding-window checkpoint path |
 
 
 
@@ -199,6 +200,42 @@ Activate the environment that matches the backend of the models you want to test
 conda activate eagle3-sglang-bench
 ```
 
+- `Local sliding-window SGLang` models:
+  - `qwen3_1p7b_sw64_sglang`
+  - `qwen3_1p7b_sw256_sglang`
+
+```bash
+# Activate the environment that contains both `sglang` and the modified
+# sliding-window `specforge` package.
+conda activate test-spec
+```
+
+The local sliding-window checkpoints are loaded with `trust_remote_code=True`, so the
+runtime environment must be able to import both:
+
+- `sglang`
+- `specforge`
+
+Initialize the modified `SpecForge` submodule before installing it into the runtime
+environment:
+
+```bash
+git submodule update --init third_party/SpecForge
+```
+
+In the current setup, `specforge` is installed from the vendored submodule path:
+
+```bash
+pip install -e third_party/SpecForge
+```
+
+The submodule is expected to track the sliding-window branch:
+
+```bash
+git -C third_party/SpecForge branch --show-current
+# expected: feat/sliding-window
+```
+
 - `vLLM` models:
   - `qwen3_1p7b_eagle3`
   - `qwen3_4b_eagle3`
@@ -215,14 +252,6 @@ conda activate eagle3-vllm-bench
 ```bash
 # Activate the AngelSlim Eagle3 environment before running AngelSlim-backed models.
 conda activate eagle3-angelslim-bench
-```
-
-- `SpecForge native sliding-window` models:
-  - `qwen3_1p7b_sw64_specforge_native`
-
-```bash
-# Activate the SpecForge environment before running SpecForge-native models.
-conda activate test-spec
 ```
 
 Run different model in separate commands under their corresponding environments.
@@ -263,20 +292,21 @@ python run_eval.py run \
   --datasets gsm8k math500 humaneval mtbench
 ```
 
-### 1.5.6 Run SpecForge Native Sliding-Window Models
+### 1.5.6 Run Local Sliding-Window Draft Models Through SGLang
 
 ```bash
-# Run the local sliding-window SpecForge checkpoint on GPUs 4,5.
+# Run the local sliding-window checkpoints on GPUs 4,5.
 conda activate test-spec
 python run_eval.py run-model \
-  --model qwen3_1p7b_sw64_specforge_native \
+  --model qwen3_1p7b_sw64_sglang \
   --gpus 4 5 \
   --datasets gsm8k
 ```
 
-The native runner reads `training_state.pt` from the draft checkpoint and reuses the
-checkpoint's recorded `sglang` target backend, draft `attention_backend`, `ttt_length`,
-and `sliding_window` settings.
+The harness now uses the SGLang EAGLE3 path for local sliding-window checkpoints.
+This repository no longer depends on the `third_party/SpecForge` submodule, but the
+runtime environment must still provide the modified `specforge` package so
+`LlamaForCausalLMEagle3` can be resolved when loading local draft checkpoints.
 
 ### 1.5.7 Sequential Scheduling Behavior
 

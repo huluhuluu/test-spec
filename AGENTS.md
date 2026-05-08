@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-`run_eval.py` is the main CLI entry for benchmark orchestration, scoring, and report generation. Core helpers live in `eval/`: `config.json` stores local paths, `config_loader.py` reads them, `prepare_data.py` builds sampled JSONL inputs, and `prompt_templates.*` defines dataset prompts. Utility scripts live in `scripts/`, generated outputs go under `artifacts/`, and vendored dependencies stay in `third_party/` (`CMMLU` submodule and `SpecForge` reference code).
+`run_eval.py` is the main CLI entry for benchmark orchestration, scoring, and report generation. Core helpers live in `eval/`: `config.json` stores local paths, `config_loader.py` reads them, `prepare_data.py` builds sampled JSONL inputs, and `prompt_templates.*` defines dataset prompts. Utility scripts live in `scripts/`, generated outputs go under `artifacts/`, and vendored dependencies stay in `third_party/` (`CMMLU` submodule).
 
 ## Build, Test, and Development Commands
 Prefix shell commands with `rtk` in this repo.

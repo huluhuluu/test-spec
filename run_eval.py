@@ -44,15 +44,12 @@ DEFAULT_SEED = 20260429
 BACKEND_SGLANG = "specforge_sglang"
 BACKEND_VLLM = "angelslim_vllm"
 BACKEND_ANGELSLIM_EAGLE3 = "angelslim_eagle3"
-BACKEND_SPECFORGE_NATIVE = "specforge_native"
 SGLANG_PYTHON_BIN = os.environ.get("SGLANG_PYTHON_BIN")
 VLLM_PYTHON_BIN = os.environ.get("VLLM_PYTHON_BIN")
 ANGELSLIM_PYTHON_BIN = os.environ.get("ANGELSLIM_PYTHON_BIN")
-SPECFORGE_PYTHON_BIN = os.environ.get("SPECFORGE_PYTHON_BIN")
 SGLANG_CONDA_ENV = os.environ.get("SGLANG_CONDA_ENV", "eagle3-sglang-bench")
 VLLM_CONDA_ENV = os.environ.get("VLLM_CONDA_ENV", "eagle3-vllm-bench")
 ANGELSLIM_CONDA_ENV = os.environ.get("ANGELSLIM_CONDA_ENV", "eagle3-angelslim-bench")
-SPECFORGE_CONDA_ENV = os.environ.get("SPECFORGE_CONDA_ENV", "test-spec")
 
 NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 BOXED_RE = re.compile(r"\\boxed\{(.+?)\}")
@@ -99,19 +96,19 @@ MODEL_REGISTRY = {
     #     "base_repo_id": "tencent/Hunyuan-4B-Instruct",
     #     "backend": BACKEND_ANGELSLIM_EAGLE3,
     # },
-    "qwen3_1p7b_sw64_specforge_native": {
+    "qwen3_1p7b_sw64_sglang": {
         "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
         "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
         "base_repo_id": "Qwen/Qwen3-1.7B",
-        "backend": BACKEND_SPECFORGE_NATIVE,
+        "backend": BACKEND_SGLANG,
         "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw64/epoch_9_step_233900",
         "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B",
     },
-    "qwen3_1p7b_sw256_specforge_native": {
+    "qwen3_1p7b_sw256_sglang": {
         "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw256",
         "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw256",
         "base_repo_id": "Qwen/Qwen3-1.7B",
-        "backend": BACKEND_SPECFORGE_NATIVE,
+        "backend": BACKEND_SGLANG,
         "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw256/epoch_9_step_233900",
         "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B",
     },
@@ -146,8 +143,6 @@ def backend_python_bin(backend: str) -> Optional[str]:
         return VLLM_PYTHON_BIN or conda_python_bin(VLLM_CONDA_ENV)
     if backend == BACKEND_ANGELSLIM_EAGLE3:
         return ANGELSLIM_PYTHON_BIN or conda_python_bin(ANGELSLIM_CONDA_ENV) or sys.executable
-    if backend == BACKEND_SPECFORGE_NATIVE:
-        return SPECFORGE_PYTHON_BIN or conda_python_bin(SPECFORGE_CONDA_ENV) or sys.executable
     return SGLANG_PYTHON_BIN or conda_python_bin(SGLANG_CONDA_ENV) or sys.executable
 
 
@@ -183,9 +178,6 @@ class ModelSpec:
             elif self.backend == BACKEND_ANGELSLIM_EAGLE3:
                 env_name = ANGELSLIM_CONDA_ENV
                 env_var = "ANGELSLIM_PYTHON_BIN"
-            elif self.backend == BACKEND_SPECFORGE_NATIVE:
-                env_name = SPECFORGE_CONDA_ENV
-                env_var = "SPECFORGE_PYTHON_BIN"
             else:
                 env_name = SGLANG_CONDA_ENV
                 env_var = "SGLANG_PYTHON_BIN"
@@ -1961,63 +1953,6 @@ def evaluate_model_angelslim_eagle3(
     return final_summary
 
 
-def evaluate_model_specforge_native(
-    model_key: str,
-    gpu_ids: list[int],
-    sample_size: int,
-    seed: int,
-    cmmlu_repo: str,
-    dataset_names: list[str],
-) -> dict[str, Any]:
-    del seed, cmmlu_repo
-    model_spec = model_specs([model_key])[0]
-    model_log_dir = LOGS_DIR / model_spec.key
-    if model_log_dir.exists():
-        shutil.rmtree(model_log_dir)
-    model_log_dir.mkdir(parents=True, exist_ok=True)
-
-    sample_paths = {name: SAMPLES_DIR / f"{name}.jsonl" for name in dataset_names}
-    missing = [str(path) for path in sample_paths.values() if not path.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Missing prepared sample files. Run `python -m eval.prepare_data` first. Missing: "
-            + ", ".join(missing)
-        )
-
-    env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
-    env["HF_HOME"] = str(DEFAULT_HF_HOME)
-    env["HF_ENDPOINT"] = "https://hf-mirror.com"
-
-    cmd = [
-        model_spec.python_bin,
-        str(ROOT / "scripts" / "run_specforge_native_eagle3.py"),
-        "--model-key",
-        model_spec.key,
-        "--model-name",
-        model_spec.display_name,
-        "--target-model-path",
-        str(model_spec.base_local_dir),
-        "--draft-model-path",
-        str(model_spec.draft_local_dir),
-        "--sample-dir",
-        str(SAMPLES_DIR),
-        "--output-dir",
-        str(model_log_dir),
-        "--sample-size",
-        str(sample_size),
-        "--tp-size",
-        str(len(gpu_ids)),
-        "--gpu-ids",
-        *[str(gpu_id) for gpu_id in gpu_ids],
-        "--datasets",
-        *dataset_names,
-        "--trust-remote-code",
-    ]
-    subprocess.run(cmd, check=True, env=env)
-    return json.loads((model_log_dir / "model_summary.json").read_text(encoding="utf-8"))
-
-
 def evaluate_model_current_process(
     model_key: str,
     gpu_ids: list[int],
@@ -2031,15 +1966,6 @@ def evaluate_model_current_process(
         return evaluate_model_vllm(model_key, gpu_ids, sample_size, seed, cmmlu_repo, dataset_names)
     if model_spec.backend == BACKEND_ANGELSLIM_EAGLE3:
         return evaluate_model_angelslim_eagle3(
-            model_key,
-            gpu_ids,
-            sample_size,
-            seed,
-            cmmlu_repo,
-            dataset_names,
-        )
-    if model_spec.backend == BACKEND_SPECFORGE_NATIVE:
-        return evaluate_model_specforge_native(
             model_key,
             gpu_ids,
             sample_size,
