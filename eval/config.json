@@ -1,6 +1,63 @@
 {
-  "model_path": "/data/HUGGINGFACE",
-  "data_path": "/data/HUGGINGFACE/data",
-  "hfd_path": "/data/HUGGINGFACE/hfd.sh",
-  "hf_endpoint": "https://hf-mirror.com"
+  "downloads": {
+    "model_path": "/data/HUGGINGFACE",
+    "data_path": "/data/HUGGINGFACE/data",
+    "hfd_path": "/data/HUGGINGFACE/hfd.sh",
+    "hf_endpoint": "https://hf-mirror.com"
+  },
+  "run_eval": {
+    "artifacts_dir": "artifacts",
+    "cmmlu_repo": "third_party/CMMLU",
+    "default_sample_size": 80,
+    "default_seed": 20260429,
+    "default_gpus": [0, 1, 2, 3],
+    "default_datasets": ["gsm8k", "math500", "mtbench", "humaneval", "ceval", "cmmlu"],
+    "default_models": [
+      "qwen3_1p7b_eagle3",
+      "qwen3_4b_eagle3-angelslim",
+      "taobao_qwen3_4b_eagle3",
+      "zjcxy_qwen3_4b_eagle3_zh",
+      "hunyuan_1p8b_eagle3",
+      "hunyuan_4b_eagle3"
+    ],
+    "trace_context_window": 16,
+    "context_length": 1024,
+    "default_max_new_tokens": 2048,
+    "long_max_new_tokens": 2048,
+    "prompt_token_safety_margin": 8,
+    "sglang_token_safety_margin": 64,
+    "mtbench_turn1_history_reserve": 256,
+    "sglang_input_token_fudge": 32,
+    "speculative": {
+      "num_steps": 7,
+      "eagle_topk": 10,
+      "num_draft_tokens": 32
+    },
+    "conda_envs": {
+      "sglang": "eagle3-sglang-bench",
+      "sglang_sliding_window": "eagle3-sglang-sw-bench",
+      "vllm": "eagle3-vllm-bench",
+      "angelslim_eagle3": "eagle3-angelslim-bench"
+    },
+    "python_bins": {
+      "sglang": null,
+      "sglang_sliding_window": null,
+      "vllm": null,
+      "angelslim_eagle3": null
+    },
+    "model_overrides": {
+      "qwen3_1p7b_sw64_sglang": {
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw64/epoch_9_step_233900",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
+      "qwen3_1p7b_sw256_sglang": {
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw256/epoch_9_step_233900",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
+      "qwen3_1p7b_eagle3_sglang_train": {
+        "draft_model_path": "/workspace/code/SpecForge/outputs/qwen3-1p7b-eagle3-sharegpt/epoch_9_step_233900",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      }
+    }
+  }
 }

@@ -8,3 +8,4 @@ artifacts/logs
 artifacts/reports
 artifacts/tmp
 artifacts/tmux_logs
+artifacts-backup/

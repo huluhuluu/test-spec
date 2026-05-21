@@ -18,10 +18,11 @@ DATA_PATH="${CONFIG_LINES[0]}"
 HFD="${CONFIG_LINES[1]}"
 HF_ENDPOINT="${CONFIG_LINES[2]}"
 export HF_ENDPOINT
+unset all_proxy ALL_PROXY http_proxy HTTP_PROXY https_proxy HTTPS_PROXY
 
 if [[ ! -f "$HFD" ]]; then
   echo "missing hfd.sh: $HFD" >&2
-  echo "edit hfd_path in eval/config.json" >&2
+  echo "edit downloads.hfd_path in eval/config.json" >&2
   exit 1
 fi
 

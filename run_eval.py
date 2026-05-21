@@ -16,40 +16,68 @@ from multiprocessing import get_context
 from pathlib import Path
 from typing import Any, Optional
 
-from eval.config_loader import MODEL_PATH
-from eval.angelslim_hunyuan_kv import HunYuanDenseV1ForCausalLMKV
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from eval.config_loader import HF_ENDPOINT, MODEL_PATH, RUN_EVAL_CONFIG, project_path
 from eval.prompt_templates import build_prompt_messages
-from eval.prepare_data import DATASET_NAMES, DEFAULT_CMMLU_REPO
+from eval.prepare_data import DATASET_NAMES, DEFAULT_CMMLU_REPO as PREPARE_DEFAULT_CMMLU_REPO
 
 ROOT = Path(__file__).resolve().parent
-ARTIFACTS = ROOT / "artifacts"
+RUN_SPEC_CONFIG = RUN_EVAL_CONFIG.get("speculative", {})
+RUN_CONDA_ENVS = RUN_EVAL_CONFIG.get("conda_envs", {})
+RUN_PYTHON_BINS = RUN_EVAL_CONFIG.get("python_bins", {})
+ARTIFACTS = project_path(RUN_EVAL_CONFIG.get("artifacts_dir", "artifacts"))
 SAMPLES_DIR = ARTIFACTS / "samples"
 LOGS_DIR = ARTIFACTS / "logs"
 REPORTS_DIR = ARTIFACTS / "reports"
 DEFAULT_HF_HOME = MODEL_PATH.expanduser()
-TRACE_CONTEXT_WINDOW = 16
+TRACE_CONTEXT_WINDOW = int(RUN_EVAL_CONFIG.get("trace_context_window", 16))
 
-SPEC_NUM_STEPS = 7
-SPEC_EAGLE_TOPK = 10
-SPEC_NUM_DRAFT_TOKENS = 32
-EVAL_CONTEXT_LENGTH = 1024
-DEFAULT_MAX_NEW_TOKENS = 2048
-LONG_MAX_NEW_TOKENS = 2048
-PROMPT_TOKEN_SAFETY_MARGIN = 8
-SGLANG_TOKEN_SAFETY_MARGIN = 64
-MTBENCH_TURN1_HISTORY_RESERVE = 256
-SGLANG_INPUT_TOKEN_FUDGE = 32
-DEFAULT_GPUS = [0, 1, 2, 3]
-DEFAULT_SEED = 20260429
+SPEC_NUM_STEPS = int(RUN_SPEC_CONFIG.get("num_steps", 7))
+SPEC_EAGLE_TOPK = int(RUN_SPEC_CONFIG.get("eagle_topk", 10))
+SPEC_NUM_DRAFT_TOKENS = int(RUN_SPEC_CONFIG.get("num_draft_tokens", 32))
+EVAL_CONTEXT_LENGTH = int(RUN_EVAL_CONFIG.get("context_length", 1024))
+DEFAULT_MAX_NEW_TOKENS = int(RUN_EVAL_CONFIG.get("default_max_new_tokens", 2048))
+LONG_MAX_NEW_TOKENS = int(RUN_EVAL_CONFIG.get("long_max_new_tokens", 2048))
+PROMPT_TOKEN_SAFETY_MARGIN = int(RUN_EVAL_CONFIG.get("prompt_token_safety_margin", 8))
+SGLANG_TOKEN_SAFETY_MARGIN = int(RUN_EVAL_CONFIG.get("sglang_token_safety_margin", 64))
+MTBENCH_TURN1_HISTORY_RESERVE = int(RUN_EVAL_CONFIG.get("mtbench_turn1_history_reserve", 256))
+SGLANG_INPUT_TOKEN_FUDGE = int(RUN_EVAL_CONFIG.get("sglang_input_token_fudge", 32))
+DEFAULT_SAMPLE_SIZE = int(RUN_EVAL_CONFIG.get("default_sample_size", 80))
+DEFAULT_GPUS = [int(gpu) for gpu in RUN_EVAL_CONFIG.get("default_gpus", [0, 1, 2, 3])]
+DEFAULT_SEED = int(RUN_EVAL_CONFIG.get("default_seed", 20260429))
+DEFAULT_DATASETS = list(RUN_EVAL_CONFIG.get("default_datasets", DATASET_NAMES))
+DEFAULT_CMMLU_REPO = project_path(
+    RUN_EVAL_CONFIG.get("cmmlu_repo", PREPARE_DEFAULT_CMMLU_REPO)
+)
 BACKEND_SGLANG = "specforge_sglang"
 BACKEND_VLLM = "angelslim_vllm"
 BACKEND_ANGELSLIM_EAGLE3 = "angelslim_eagle3"
-SGLANG_PYTHON_BIN = os.environ.get("SGLANG_PYTHON_BIN")
-VLLM_PYTHON_BIN = os.environ.get("VLLM_PYTHON_BIN")
-ANGELSLIM_PYTHON_BIN = os.environ.get("ANGELSLIM_PYTHON_BIN")
-SGLANG_CONDA_ENV = os.environ.get("SGLANG_CONDA_ENV", "eagle3-sglang-bench")
-VLLM_CONDA_ENV = os.environ.get("VLLM_CONDA_ENV", "eagle3-vllm-bench")
-ANGELSLIM_CONDA_ENV = os.environ.get("ANGELSLIM_CONDA_ENV", "eagle3-angelslim-bench")
+SGLANG_PYTHON_BIN = os.environ.get("SGLANG_PYTHON_BIN") or RUN_PYTHON_BINS.get("sglang")
+SGLANG_SW_PYTHON_BIN = (
+    os.environ.get("SGLANG_SW_PYTHON_BIN") or RUN_PYTHON_BINS.get("sglang_sliding_window")
+)
+VLLM_PYTHON_BIN = os.environ.get("VLLM_PYTHON_BIN") or RUN_PYTHON_BINS.get("vllm")
+ANGELSLIM_PYTHON_BIN = (
+    os.environ.get("ANGELSLIM_PYTHON_BIN") or RUN_PYTHON_BINS.get("angelslim_eagle3")
+)
+SGLANG_CONDA_ENV = os.environ.get(
+    "SGLANG_CONDA_ENV",
+    RUN_CONDA_ENVS.get("sglang", "eagle3-sglang-bench"),
+)
+SGLANG_SW_CONDA_ENV = os.environ.get(
+    "SGLANG_SW_CONDA_ENV",
+    RUN_CONDA_ENVS.get("sglang_sliding_window", "eagle3-sglang-sw-bench"),
+)
+VLLM_CONDA_ENV = os.environ.get(
+    "VLLM_CONDA_ENV",
+    RUN_CONDA_ENVS.get("vllm", "eagle3-vllm-bench"),
+)
+ANGELSLIM_CONDA_ENV = os.environ.get(
+    "ANGELSLIM_CONDA_ENV",
+    RUN_CONDA_ENVS.get("angelslim_eagle3", "eagle3-angelslim-bench"),
+)
 
 NUM_RE = re.compile(r"-?\d[\d,]*\.?\d*")
 BOXED_RE = re.compile(r"\\boxed\{(.+?)\}")
@@ -60,18 +88,24 @@ CODE_LINE_RE = re.compile(
 )
 
 MODEL_REGISTRY = {
-    "qwen3_1p7b_eagle3": {
+    "qwen3_1p7b_eagle3-angelslim": {
         "display_name": "AngelSlim/Qwen3-1.7B_eagle3",
         "draft_repo_id": "AngelSlim/Qwen3-1.7B_eagle3",
         "base_repo_id": "Qwen/Qwen3-1.7B",
-        "backend": BACKEND_VLLM,
+        "backend": BACKEND_ANGELSLIM_EAGLE3,
     },
-    # "qwen3_4b_eagle3": {
-    #     "display_name": "AngelSlim/Qwen3-4B_eagle3",
-    #     "draft_repo_id": "AngelSlim/Qwen3-4B_eagle3",
-    #     "base_repo_id": "Qwen/Qwen3-4B",
-    #     "backend": BACKEND_VLLM,
-    # },
+    "qwen3_1p7b_eagle3_sglang_train": {
+        "display_name": "Qwen3-1.7B_eagle3_sharegpt_sglang_train",
+        "draft_repo_id": "local/Qwen3-1.7B_eagle3",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SGLANG,
+    },
+    "qwen3_4b_eagle3-angelslim": {
+        "display_name": "AngelSlim/Qwen3-4B_eagle3",
+        "draft_repo_id": "AngelSlim/Qwen3-4B_eagle3",
+        "base_repo_id": "Qwen/Qwen3-4B",
+        "backend": BACKEND_ANGELSLIM_EAGLE3,
+    },
     "taobao_qwen3_4b_eagle3": {
         "display_name": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3",
         "draft_repo_id": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3",
@@ -90,38 +124,32 @@ MODEL_REGISTRY = {
         "base_repo_id": "tencent/Hunyuan-1.8B-Instruct",
         "backend": BACKEND_ANGELSLIM_EAGLE3,
     },
-    # "hunyuan_4b_eagle3": {
-    #     "display_name": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
-    #     "draft_repo_id": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
-    #     "base_repo_id": "tencent/Hunyuan-4B-Instruct",
-    #     "backend": BACKEND_ANGELSLIM_EAGLE3,
-    # },
+    "hunyuan_4b_eagle3": {
+        "display_name": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
+        "draft_repo_id": "AngelSlim/Hunyuan-4B-Instruct_eagle3",
+        "base_repo_id": "tencent/Hunyuan-4B-Instruct",
+        "backend": BACKEND_ANGELSLIM_EAGLE3,
+    },
     "qwen3_1p7b_sw64_sglang": {
         "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
         "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
         "base_repo_id": "Qwen/Qwen3-1.7B",
         "backend": BACKEND_SGLANG,
-        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw64/epoch_9_step_233900",
-        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B",
+        "requires_sliding_window_specforge": True,
     },
     "qwen3_1p7b_sw256_sglang": {
         "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw256",
         "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw256",
         "base_repo_id": "Qwen/Qwen3-1.7B",
         "backend": BACKEND_SGLANG,
-        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw256/epoch_9_step_233900",
-        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B",
+        "requires_sliding_window_specforge": True,
     },
 }
 
-DEFAULT_MODEL_KEYS = [
-    "qwen3_1p7b_eagle3",
-    "qwen3_4b_eagle3",
-    "taobao_qwen3_4b_eagle3",
-    "zjcxy_qwen3_4b_eagle3_zh",
-    "hunyuan_1p8b_eagle3",
-    "hunyuan_4b_eagle3",
-]
+for model_key, model_config in RUN_EVAL_CONFIG.get("model_overrides", {}).items():
+    MODEL_REGISTRY[model_key] = {**MODEL_REGISTRY.get(model_key, {}), **model_config}
+
+DEFAULT_MODEL_KEYS = list(RUN_EVAL_CONFIG.get("default_models", list(MODEL_REGISTRY)))
 
 def conda_python_bin(env_name: str) -> Optional[str]:
     if not shutil.which("conda"):
@@ -146,6 +174,10 @@ def backend_python_bin(backend: str) -> Optional[str]:
     return SGLANG_PYTHON_BIN or conda_python_bin(SGLANG_CONDA_ENV) or sys.executable
 
 
+def sglang_sliding_window_python_bin() -> Optional[str]:
+    return SGLANG_SW_PYTHON_BIN or conda_python_bin(SGLANG_SW_CONDA_ENV)
+
+
 @dataclass(frozen=True)
 class ModelSpec:
     key: str
@@ -155,6 +187,7 @@ class ModelSpec:
     backend: str
     draft_model_path: Optional[str] = None
     base_model_path: Optional[str] = None
+    requires_sliding_window_specforge: bool = False
 
     @property
     def draft_local_dir(self) -> Path:
@@ -170,7 +203,10 @@ class ModelSpec:
 
     @property
     def python_bin(self) -> str:
-        python_bin = backend_python_bin(self.backend)
+        if self.backend == BACKEND_SGLANG and self.requires_sliding_window_specforge:
+            python_bin = sglang_sliding_window_python_bin()
+        else:
+            python_bin = backend_python_bin(self.backend)
         if not python_bin:
             if self.backend == BACKEND_VLLM:
                 env_name = VLLM_CONDA_ENV
@@ -178,6 +214,9 @@ class ModelSpec:
             elif self.backend == BACKEND_ANGELSLIM_EAGLE3:
                 env_name = ANGELSLIM_CONDA_ENV
                 env_var = "ANGELSLIM_PYTHON_BIN"
+            elif self.requires_sliding_window_specforge:
+                env_name = SGLANG_SW_CONDA_ENV
+                env_var = "SGLANG_SW_PYTHON_BIN"
             else:
                 env_name = SGLANG_CONDA_ENV
                 env_var = "SGLANG_PYTHON_BIN"
@@ -196,6 +235,25 @@ def repo_leaf(repo_id: str) -> str:
 def model_specs(model_keys: Optional[list[str]] = None) -> list[ModelSpec]:
     keys = model_keys or list(MODEL_REGISTRY)
     return [ModelSpec(key=key, **MODEL_REGISTRY[key]) for key in keys]
+
+
+def ensure_sliding_window_specforge_available(model_spec: ModelSpec) -> None:
+    if not model_spec.requires_sliding_window_specforge:
+        return
+    try:
+        module = importlib.import_module("specforge.modeling.draft.llama3_eagle")
+    except ImportError as exc:
+        raise ImportError(
+            "Sliding-window SGLang models require the modified SpecForge package. "
+            "Install it in the selected runtime environment with "
+            "`pip install -e third_party/SpecForge` from the `feat/sliding-window` branch, "
+            "or set SGLANG_SW_PYTHON_BIN / SGLANG_SW_CONDA_ENV to an environment that has it."
+        ) from exc
+    if not hasattr(module, "LlamaForCausalLMEagle3"):
+        raise ImportError(
+            "The installed SpecForge package does not expose LlamaForCausalLMEagle3. "
+            "Use the modified sliding-window SpecForge branch."
+        )
 
 
 def ensure_dirs() -> None:
@@ -305,7 +363,12 @@ def build_trace_stats(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
     accept_lengths = [int(ev["accept_len"]) for ev in trace_events if ev.get("accept_len") is not None]
     total_draft_tokens = 0
     for ev in trace_events:
-        total_draft_tokens += len(ev.get("draft_chunk_token_ids") or [])
+        if ev.get("num_draft_tokens") is not None:
+            total_draft_tokens += int(ev["num_draft_tokens"])
+        elif isinstance(ev.get("tree"), dict) and isinstance(ev["tree"].get("draft_token_ids"), list):
+            total_draft_tokens += max(0, len(ev["tree"]["draft_token_ids"]) - 1)
+        else:
+            total_draft_tokens += len(ev.get("draft_chunk_token_ids") or [])
     return {
         "spec_accept_length": mean_accept_length(accept_lengths),
         "spec_accept_rate": (
@@ -314,6 +377,50 @@ def build_trace_stats(trace_events: list[dict[str, Any]]) -> dict[str, Any]:
         "spec_verify_ct": len(accept_lengths),
         "accept_length_histogram": accept_length_histogram(accept_lengths),
     }
+
+
+def context_accept_length_stats(trace_events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[int, list[int]] = {}
+    for ev in trace_events:
+        if ev.get("context_len") is None or ev.get("accept_len") is None:
+            continue
+        context_len = int(ev["context_len"])
+        grouped.setdefault(context_len, []).append(int(ev["accept_len"]))
+
+    rows = []
+    for context_len in sorted(grouped):
+        values = grouped[context_len]
+        rows.append(
+            {
+                "context_len": context_len,
+                "count": len(values),
+                "mean_accept_len": mean_accept_length(values),
+            }
+        )
+    return rows
+
+
+def merge_context_accept_length(summaries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[int, dict[str, float]] = {}
+    for summary in summaries:
+        for row in summary.get("context_accept_length", []):
+            context_len = int(row["context_len"])
+            count = int(row["count"])
+            grouped.setdefault(context_len, {"count": 0.0, "sum": 0.0})
+            grouped[context_len]["count"] += count
+            grouped[context_len]["sum"] += float(row["mean_accept_len"]) * count
+
+    rows = []
+    for context_len in sorted(grouped):
+        count = int(grouped[context_len]["count"])
+        rows.append(
+            {
+                "context_len": context_len,
+                "count": count,
+                "mean_accept_len": grouped[context_len]["sum"] / count if count else 0.0,
+            }
+        )
+    return rows
 
 
 def build_trace_event(
@@ -343,6 +450,7 @@ def build_trace_event(
         "step_index": step_index,
         "turn_index": turn_index,
         "accept_len": accept_len,
+        "context_len": len(prefix_token_ids),
         "prefix_token_ids": prefix_tail,
         "prefix_tokens": decode_token_pieces(tokenizer, prefix_tail),
         "prefix_text": decode_token_text(tokenizer, prefix_tail),
@@ -378,6 +486,8 @@ def read_jsonl_new_entries(path: Path, start_offset: int) -> tuple[list[dict[str
 
 
 def load_angelslim_eagle3_model_class() -> Any:
+    from eval.angelslim_hunyuan_kv import HunYuanDenseV1ForCausalLMKV
+
     try:
         eagle3_module = importlib.import_module(
             "angelslim.compressor.speculative.inference.models.eagle3.eagle3_model"
@@ -979,6 +1089,7 @@ def summarise_dataset_results(
             for key, value in meta_hist.items():
                 histogram[int(key)] += int(value)
     summary["accept_length_histogram"] = {str(k): histogram[k] for k in sorted(histogram)}
+    summary["context_accept_length"] = context_accept_length_stats(trace_events)
     summary["spec_trace_event_count"] = len(trace_events)
     return summary
 
@@ -1243,16 +1354,18 @@ def evaluate_model_sglang(
     del seed, cmmlu_repo
     os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
     os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    os.environ["HF_ENDPOINT"] = HF_ENDPOINT
     os.environ["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
     os.environ["EAGLE3_TRACE_BACKEND"] = "sglang"
+    os.environ["EAGLE3_TRACE_CONTEXT_WINDOW"] = str(TRACE_CONTEXT_WINDOW)
     prepend_pythonpath(ROOT)
 
     from transformers import AutoTokenizer
     from sglang.srt.entrypoints.engine import Engine
-    import sitecustomize
+    from eval import sitecustomize
 
     model_spec = model_specs([model_key])[0]
+    ensure_sliding_window_specforge_available(model_spec)
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_spec.base_local_dir),
         trust_remote_code=True,
@@ -1361,6 +1474,7 @@ def evaluate_model_sglang(
             "tensor_parallel_size": len(gpu_ids),
         },
         "datasets": summaries,
+        "context_accept_length": merge_context_accept_length(summaries),
     }
     json_dump(model_log_dir / "model_summary.json", final_summary)
     return final_summary
@@ -1643,7 +1757,8 @@ def evaluate_model_vllm(
     del seed, cmmlu_repo
     os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
     os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    os.environ["HF_ENDPOINT"] = HF_ENDPOINT
+    os.environ["EAGLE3_TRACE_CONTEXT_WINDOW"] = str(TRACE_CONTEXT_WINDOW)
     prepend_pythonpath(ROOT)
 
     from transformers import AutoTokenizer
@@ -1663,7 +1778,7 @@ def evaluate_model_vllm(
     os.environ["EAGLE3_TRACE_BACKEND"] = "vllm"
     os.environ["EAGLE3_TRACE_PATH"] = str(trace_path)
     os.environ["EAGLE3_TRACE_TOKENIZER_PATH"] = str(model_spec.base_local_dir)
-    import sitecustomize
+    from eval import sitecustomize
 
     sitecustomize.install_vllm_trace_patch()
 
@@ -1770,6 +1885,7 @@ def evaluate_model_vllm(
             "tensor_parallel_size": len(gpu_ids),
         },
         "datasets": summaries,
+        "context_accept_length": merge_context_accept_length(summaries),
     }
     json_dump(model_log_dir / "model_summary.json", final_summary)
     return final_summary
@@ -1786,7 +1902,7 @@ def evaluate_model_angelslim_eagle3(
     del seed, cmmlu_repo
     os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
     os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
-    os.environ["HF_ENDPOINT"] = "https://hf-mirror.com"
+    os.environ["HF_ENDPOINT"] = HF_ENDPOINT
 
     import torch
 
@@ -1948,6 +2064,7 @@ def evaluate_model_angelslim_eagle3(
             "tensor_parallel_size": len(gpu_ids),
         },
         "datasets": summaries,
+        "context_accept_length": merge_context_accept_length(summaries),
     }
     json_dump(model_log_dir / "model_summary.json", final_summary)
     return final_summary
@@ -2012,7 +2129,8 @@ def orchestrate_run(
         ]
         env = os.environ.copy()
         env["HF_HOME"] = str(DEFAULT_HF_HOME)
-        env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        env["HF_ENDPOINT"] = HF_ENDPOINT
+        env["EAGLE3_TRACE_CONTEXT_WINDOW"] = str(TRACE_CONTEXT_WINDOW)
         with worker_log.open("w", encoding="utf-8") as f:
             subprocess.run(cmd, check=True, env=env, stdout=f, stderr=subprocess.STDOUT)
         summary_path = LOGS_DIR / model_spec.key / "model_summary.json"
@@ -2064,10 +2182,10 @@ def parse_args() -> argparse.Namespace:
     sub = parser.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--sample-size", type=int, default=80)
+    common.add_argument("--sample-size", type=int, default=DEFAULT_SAMPLE_SIZE)
     common.add_argument("--seed", type=int, default=DEFAULT_SEED)
     common.add_argument("--cmmlu-repo", type=Path, default=DEFAULT_CMMLU_REPO)
-    common.add_argument("--datasets", nargs="*", default=DATASET_NAMES, choices=DATASET_NAMES)
+    common.add_argument("--datasets", nargs="*", default=DEFAULT_DATASETS, choices=DATASET_NAMES)
 
     p_run = sub.add_parser("run", parents=[common])
     p_run.add_argument("--models", nargs="*", default=DEFAULT_MODEL_KEYS)

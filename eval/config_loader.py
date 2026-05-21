@@ -6,6 +6,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parent
+PROJECT_ROOT = ROOT.parent
 CONFIG_PATH = ROOT / "config.json"
 
 
@@ -14,10 +15,19 @@ def load_config() -> dict[str, Any]:
 
 
 CONFIG = load_config()
-MODEL_PATH = Path(CONFIG["model_path"]).expanduser()
-DATA_PATH = Path(CONFIG["data_path"]).expanduser()
-HFD_PATH = Path(CONFIG["hfd_path"]).expanduser()
-HF_ENDPOINT = CONFIG.get("hf_endpoint", "https://hf-mirror.com")
+DOWNLOAD_CONFIG = CONFIG.get("downloads", CONFIG)
+MODEL_PATH = Path(DOWNLOAD_CONFIG["model_path"]).expanduser()
+DATA_PATH = Path(DOWNLOAD_CONFIG["data_path"]).expanduser()
+HFD_PATH = Path(DOWNLOAD_CONFIG["hfd_path"]).expanduser()
+HF_ENDPOINT = DOWNLOAD_CONFIG.get("hf_endpoint", "https://hf-mirror.com")
+RUN_EVAL_CONFIG = CONFIG.get("run_eval", {})
+
+
+def project_path(value: str | Path) -> Path:
+    path = Path(value).expanduser()
+    if path.is_absolute():
+        return path
+    return PROJECT_ROOT / path
 
 
 HF_DATASET_REPOS = {
