@@ -390,6 +390,130 @@ def _build_sglang_v1_trace_events_from_verify(
     return events
 
 
+def _build_dflash_trace_events_from_verify(
+    batch: Any,
+    spec_info: Any,
+    output: Any,
+) -> list[dict[str, Any]]:
+    if (
+        spec_info is None
+        or getattr(spec_info, "draft_token", None) is None
+        or getattr(spec_info, "draft_token_num", None) is None
+        or output is None
+        or len(output) < 4
+    ):
+        return []
+
+    draft_token_num = int(spec_info.draft_token_num or 0)
+    if draft_token_num <= 0:
+        return []
+
+    _, commit_lens, _, accept_length_per_req_cpu = output
+    reqs = list(getattr(batch, "reqs", []))
+    draft_tokens = _to_int_list(spec_info.draft_token)
+    positions = _to_raw_int_list(getattr(spec_info, "positions", None))
+    commit_lens_list = _to_int_list(commit_lens)
+    accept_lens = [max(0, int(x)) for x in accept_length_per_req_cpu]
+    if len(accept_lens) != len(reqs):
+        return []
+
+    events: list[dict[str, Any]] = []
+    tokenizer = _load_tokenizer()
+    for i, req in enumerate(reqs):
+        draft_start = i * draft_token_num
+        draft_end = draft_start + draft_token_num
+        candidate_chain = draft_tokens[draft_start:draft_end]
+        chain_positions = positions[draft_start:draft_end]
+        if not candidate_chain:
+            continue
+
+        accept_len = min(accept_lens[i], max(0, len(candidate_chain) - 1))
+        commit_len = (
+            int(commit_lens_list[i])
+            if i < len(commit_lens_list)
+            else min(accept_len + 1, len(candidate_chain))
+        )
+        output_ids = _to_int_list(getattr(req, "output_ids", None))
+        committed_token_ids = output_ids[-commit_len:] if commit_len > 0 else []
+        current_prefix = _request_prefix_token_ids(req)
+        prefix_token_ids = (
+            current_prefix[:-commit_len] if commit_len <= len(current_prefix) else []
+        )
+        prefix_tail = prefix_token_ids[-TRACE_CONTEXT_WINDOW:]
+        draft_chunk = candidate_chain[1:]
+        accepted_token_ids = draft_chunk[:accept_len]
+        rejected_candidate_token_ids = (
+            draft_chunk[accept_len : accept_len + 1]
+            if accept_len < len(draft_chunk)
+            else []
+        )
+        bonus_token_id = (
+            committed_token_ids[accept_len]
+            if len(committed_token_ids) > accept_len
+            else None
+        )
+        rid = str(getattr(req, "rid", i))
+        step_index = _SGLANG_STEP_COUNTS.get(rid, 0) + 1
+        _SGLANG_STEP_COUNTS[rid] = step_index
+        events.append(
+            {
+                "rid": rid,
+                "backend": "sglang_dflash",
+                "step_index": step_index,
+                "accept_len": accept_len,
+                "context_len": len(prefix_token_ids),
+                "num_draft_tokens": max(0, len(candidate_chain) - 1),
+                "prefix_token_ids": prefix_tail,
+                "prefix_tokens": _decode_token_pieces(tokenizer, prefix_tail),
+                "prefix_text": _decode_token_text(tokenizer, prefix_tail),
+                "draft_chunk_token_ids": draft_chunk,
+                "draft_chunk_tokens": _decode_token_pieces(tokenizer, draft_chunk),
+                "accepted_token_ids": accepted_token_ids,
+                "accepted_tokens": _decode_token_pieces(tokenizer, accepted_token_ids),
+                "rejected_candidate_token_ids": rejected_candidate_token_ids,
+                "rejected_candidate_tokens": _decode_token_pieces(
+                    tokenizer, rejected_candidate_token_ids
+                ),
+                "committed_token_ids": committed_token_ids,
+                "committed_tokens": _decode_token_pieces(tokenizer, committed_token_ids),
+                "committed_text": _decode_token_text(tokenizer, committed_token_ids),
+                "replacement_token_id": bonus_token_id,
+                "replacement_token": _decode_single_token(tokenizer, bonus_token_id),
+                "draft_block": {
+                    "candidate_chain_token_ids": candidate_chain,
+                    "candidate_chain_tokens": _decode_token_pieces(tokenizer, candidate_chain),
+                    "positions": chain_positions,
+                    "block_size": draft_token_num,
+                    "anchor_token_id": candidate_chain[0] if candidate_chain else None,
+                    "anchor_token": _decode_single_token(
+                        tokenizer, candidate_chain[0] if candidate_chain else None
+                    ),
+                },
+                "verify": {
+                    "accepted_draft_token_ids": accepted_token_ids,
+                    "accepted_draft_tokens": _decode_token_pieces(
+                        tokenizer, accepted_token_ids
+                    ),
+                    "first_rejected_candidate_token_id": (
+                        rejected_candidate_token_ids[0]
+                        if rejected_candidate_token_ids
+                        else None
+                    ),
+                    "first_rejected_candidate_token": (
+                        _decode_single_token(tokenizer, rejected_candidate_token_ids[0])
+                        if rejected_candidate_token_ids
+                        else None
+                    ),
+                    "bonus_token_id": bonus_token_id,
+                    "bonus_token": _decode_single_token(tokenizer, bonus_token_id),
+                    "commit_len": commit_len,
+                },
+            }
+        )
+
+    return events
+
+
 def _build_vllm_trace_events(
     model_runner: Any,
     spec_decode_metadata: Any,
@@ -588,12 +712,228 @@ def install_sglang_trace_patch() -> None:
     apply_eagle_worker_patch()
 
 
+def install_sglang_dflash_trace_patch() -> None:
+    if os.environ.get("EAGLE3_TRACE_BACKEND") != "sglang":
+        return
+    if os.environ.get("EAGLE3_TRACE_DFLASH") != "1":
+        return
+    try:
+        from sglang.srt.entrypoints import engine as engine_module
+        from sglang.srt.speculative import dflash_info as dflash_info_module
+    except Exception:
+        return
+
+    if getattr(dflash_info_module.DFlashVerifyInput, "_dflash_trace_patched", False):
+        engine_module.Engine.run_scheduler_process_func = staticmethod(
+            run_sglang_scheduler_process_with_trace
+        )
+        return
+
+    original_verify = dflash_info_module.DFlashVerifyInput.verify
+
+    def wrapped_verify(self: Any, *args: Any, **kwargs: Any) -> Any:
+        batch = kwargs.get("batch")
+        if batch is None and args:
+            batch = args[0]
+        output = original_verify(self, *args, **kwargs)
+        try:
+            if batch is not None and len(output) >= 4:
+                accept_lengths = [max(0, int(x)) for x in output[3]]
+                for req, accept_len in zip(getattr(batch, "reqs", []), accept_lengths):
+                    req.update_spec_acceptance_histogram(accept_len)
+                _append_trace_events(
+                    _build_dflash_trace_events_from_verify(batch, self, output)
+                )
+        except Exception:
+            pass
+        return output
+
+    dflash_info_module.DFlashVerifyInput.verify = wrapped_verify
+    dflash_info_module.DFlashVerifyInput._dflash_trace_patched = True
+    engine_module.Engine.run_scheduler_process_func = staticmethod(
+        run_sglang_scheduler_process_with_trace
+    )
+
+
+def install_sglang_sliding_window_eagle_patch() -> None:
+    try:
+        from sglang.srt.models import llama_eagle3 as llama_eagle3_module
+    except Exception:
+        return
+
+    def get_attention_sliding_window_size(self: Any) -> int | None:
+        sliding_window = getattr(self.config, "sliding_window", None)
+        if not getattr(self.config, "use_sliding_window", False) or sliding_window is None:
+            return None
+        return int(sliding_window) - 1
+
+    llama_eagle3_module.LlamaForCausalLMEagle3.get_attention_sliding_window_size = (
+        get_attention_sliding_window_size
+    )
+
+    existing_model_init = getattr(llama_eagle3_module.LlamaModel, "__init__", None)
+    existing_model_source = getattr(existing_model_init, "__code__", None)
+    if existing_model_source is not None and "num_hidden_layers" in existing_model_source.co_names:
+        llama_eagle3_module.LlamaForCausalLMEagle3._sliding_window_eagle3_patched = True
+        return
+
+    if getattr(llama_eagle3_module.LlamaForCausalLMEagle3, "_sliding_window_eagle3_patched", False):
+        return
+
+    import copy
+    import torch
+    from torch import nn
+
+    from sglang.srt.distributed import get_pp_group
+    from sglang.srt.layers.logits_processor import LogitsProcessor
+    from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+    from sglang.srt.model_loader.weight_utils import default_weight_loader
+    from sglang.srt.utils import add_prefix
+
+    original_model_init = llama_eagle3_module.LlamaModel.__init__
+
+    def model_init(self: Any, config: Any, quant_config: Any = None, prefix: str = "") -> None:
+        original_model_init(self, config, quant_config=quant_config, prefix=prefix)
+        num_layers = max(1, int(getattr(config, "num_hidden_layers", 1)))
+        if num_layers == 1:
+            self.layers = nn.ModuleList([self.midlayer])
+            return
+        self.layers = nn.ModuleList(
+            [
+                llama_eagle3_module.LlamaDecoderLayer(
+                    config,
+                    layer_id,
+                    quant_config,
+                    add_prefix(f"layers.{layer_id}", prefix),
+                )
+                for layer_id in range(num_layers)
+            ]
+        )
+        self.midlayer = self.layers[0]
+
+    def model_forward(
+        self: Any,
+        input_ids: Any,
+        positions: Any,
+        forward_batch: Any,
+        input_embeds: Any = None,
+        pp_proxy_tensors: Any = None,
+    ) -> Any:
+        del pp_proxy_tensors
+        embeds = self.embed_tokens(input_ids) if input_embeds is None else input_embeds
+        if self.is_mrope_enabled:
+            positions = forward_batch.mrope_positions
+
+        hidden_states = forward_batch.spec_info.hidden_states
+        if hidden_states.shape[-1] != embeds.shape[-1]:
+            hidden_states = self.fc(hidden_states)
+
+        if hidden_states.shape[0] == 0:
+            return hidden_states, [hidden_states]
+
+        residual = None
+        layers = getattr(self, "layers", [self.midlayer])
+        for layer in layers:
+            hidden_states, residual = layer(
+                positions,
+                embeds,
+                hidden_states,
+                forward_batch,
+                residual,
+            )
+
+        hidden_states_to_logits, hidden_states_to_aux = self.norm(hidden_states, residual)
+        return hidden_states_to_logits, [hidden_states_to_aux]
+
+    def causal_lm_init(
+        self: Any,
+        config: Any,
+        quant_config: Any = None,
+        draft_model_idx: int | None = None,
+        prefix: str = "",
+    ) -> None:
+        nn.Module.__init__(self)
+        self.config = config
+        self.quant_config = quant_config
+        self.pp_group = get_pp_group()
+        self.draft_model_idx = draft_model_idx
+        self.model = llama_eagle3_module.LlamaModel(
+            config,
+            quant_config=quant_config,
+            prefix=add_prefix("model", prefix),
+        )
+
+        self.load_lm_head_from_target = False
+        if self.config.tie_word_embeddings:
+            self.lm_head = self.model.embed_tokens
+        else:
+            if config.draft_vocab_size is None:
+                self.load_lm_head_from_target = True
+                config.draft_vocab_size = config.vocab_size
+            self.lm_head = ParallelLMHead(
+                config.draft_vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=add_prefix("lm_head", prefix),
+            )
+
+        config_for_logits = copy.deepcopy(config)
+        config_for_logits.vocab_size = config_for_logits.draft_vocab_size
+        self.logits_processor = LogitsProcessor(config_for_logits)
+        self.capture_aux_hidden_states = True
+        self.hot_token_id = None
+
+    def load_weights(self: Any, weights: Any) -> None:
+        params_dict = dict(self.named_parameters())
+        stacked_params_mapping = [
+            (".qkv_proj", ".q_proj", "q"),
+            (".qkv_proj", ".k_proj", "k"),
+            (".qkv_proj", ".v_proj", "v"),
+            (".gate_up_proj", ".gate_proj", 0),
+            (".gate_up_proj", ".up_proj", 1),
+        ]
+
+        for name, loaded_weight in weights:
+            if "d2t" in name:
+                self.hot_token_id = loaded_weight + torch.arange(loaded_weight.shape[0])
+                continue
+            if "t2d" in name:
+                continue
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param_name = name if name in params_dict else f"model.{name}"
+                if param_name in params_dict:
+                    param = params_dict[param_name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param_name = name if name in params_dict else f"model.{name}"
+                if param_name in params_dict:
+                    param = params_dict[param_name]
+                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader(param, loaded_weight)
+
+    llama_eagle3_module.LlamaModel.__init__ = model_init
+    llama_eagle3_module.LlamaModel.forward = model_forward
+    llama_eagle3_module.LlamaForCausalLMEagle3.__init__ = causal_lm_init
+    llama_eagle3_module.LlamaForCausalLMEagle3.load_weights = load_weights
+    llama_eagle3_module.LlamaForCausalLMEagle3._sliding_window_eagle3_patched = True
+
+
 def run_sglang_scheduler_process_with_trace(*args: Any, **kwargs: Any) -> Any:
     from sglang.srt.managers.scheduler import run_scheduler_process
 
+    if os.environ.get("EAGLE3_SLIDING_WINDOW_EAGLE_PATCH") == "1":
+        install_sglang_sliding_window_eagle_patch()
     install_sglang_trace_patch()
+    install_sglang_dflash_trace_patch()
     return run_scheduler_process(*args, **kwargs)
 
 
 install_vllm_trace_patch()
 install_sglang_trace_patch()
+install_sglang_dflash_trace_patch()

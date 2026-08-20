@@ -2,7 +2,7 @@
 
 This repository evaluates EAGLE-3 draft models across reasoning, coding, chat, and Chinese exam benchmarks. The main entry point is [`run_eval.py`](run_eval.py), which handles dataset sampling, backend dispatch, speculative-decoding trace collection, scoring, and report generation.
 
-The harness requires model weights, one `SGLang` environment, one `vLLM` environment, one `AngelSlim` Eagle3 environment, and the `CMMLU` submodule.
+The harness requires model weights, one regular `SGLang` environment, one sliding-window `SGLang` environment, one mask-hidden `SGLang` environment, one `vLLM` environment, one `AngelSlim` Eagle3 environment, and the `CMMLU` submodule.
 
 ## 1.1 Quick Start
 
@@ -47,9 +47,27 @@ This benchmark uses separate Python environments because `SGLang`, local sliding
 
   # Install the modified SpecForge branch used to produce and load the
   # sliding-window draft checkpoints.
-  git submodule update --init third_party/SpecForge
-  git -C third_party/SpecForge checkout feat/sliding-window
-  pip install -e third_party/SpecForge
+  git submodule update --init third_party/SpecForge-sliding-window
+  git -C third_party/SpecForge-sliding-window checkout feat/sliding-window
+  pip install -e third_party/SpecForge-sliding-window
+  ```
+
+- **SGLang mask-hidden environment**
+
+  ```bash
+  # Create the SGLang environment used by local future-hidden draft checkpoints.
+  conda create -y -n test-spec python=3.11
+  conda activate test-spec
+
+  export UV_DEFAULT_INDEX=https://mirrors.ustc.edu.cn/pypi/simple
+  uv pip install "sglang[all]"
+  uv pip install transformers sympy antlr4-python3-runtime pyarrow datasets accelerate
+
+  # Install the modified SpecForge branch used to produce and load the
+  # future-hidden draft checkpoints.
+  git submodule update --init third_party/SpecForge-mask-hidden
+  git -C third_party/SpecForge-mask-hidden checkout feat/mask-hidden
+  pip install -e third_party/SpecForge-mask-hidden
   ```
 
 - **vLLM environment**
@@ -143,8 +161,7 @@ python run_eval.py run-model \
 ├── scripts/
 │   ├── download_datasets.sh     # dataset downloader
 │   ├── download_models.sh       # model downloader
-│   ├── plot_context_accept_length.py # context/accept plot
-│   └── viz_trace.py             # trace tree renderer
+│   └── visualization/           # trace, entropy, and acceptance plots
 ├── third_party/
 │   └── CMMLU/                   # CMMLU submodule
 └── artifacts/
@@ -316,7 +333,9 @@ python run_eval.py run-model \
   --datasets gsm8k
 ```
 
-For sliding-window draft checkpoints, set `"requires_sliding_window_specforge": true` on the `MODEL_REGISTRY` entry and run from an environment with the modified `third_party/SpecForge` installed.
+For sliding-window draft checkpoints, set `"requires_sliding_window_specforge": true` on the `MODEL_REGISTRY` entry and run from an environment with the modified `third_party/SpecForge-sliding-window` installed.
+
+For future-hidden draft checkpoints, set `"requires_mask_hidden_specforge": true` on the `MODEL_REGISTRY` entry and run from an environment with the modified `third_party/SpecForge-mask-hidden` installed.
 
 ### 1.5.3 Common Arguments
 

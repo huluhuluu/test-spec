@@ -35,7 +35,7 @@
     },
     "conda_envs": {
       "sglang": "eagle3-sglang-bench",
-      "sglang_sliding_window": "eagle3-sglang-sw-bench",
+      "sglang_sliding_window": "test-spec",
       "vllm": "eagle3-vllm-bench",
       "angelslim_eagle3": "eagle3-angelslim-bench"
     },
@@ -50,12 +50,36 @@
         "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw64/epoch_9_step_233900",
         "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
       },
+      "qwen3_1p7b_sw128_sglang": {
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw128/epoch_9_step_233900",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
+      "qwen3_1p7b_k2_sw128_sglang": {
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-k2-sw128-sharegpt/epoch_7_step_175000",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
+      "qwen3_1p7b_k4_sw256_sglang": {
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-k4-sw256-sharegpt/epoch_2_step_70000",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
+      "qwen3_1p7b_k2_sw256_sglang": {
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-k2-sw256-sharegpt/epoch_2_step_60000",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
+      "qwen3_1p7b_k2_sw256_mha_sglang": {
+        "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-k2-sw256-mha-sharegpt/epoch_9_step_171560",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
       "qwen3_1p7b_sw256_sglang": {
         "draft_model_path": "/workspace/code/test-spec/SpecForge/outputs/qwen3-1.7b-eagle3-sharegpt-sw256/epoch_9_step_233900",
         "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
       },
       "qwen3_1p7b_eagle3_sglang_train": {
         "draft_model_path": "/workspace/code/SpecForge/outputs/qwen3-1p7b-eagle3-sharegpt/epoch_9_step_233900",
+        "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
+      },
+      "qwen3_1p7b_eagle3_vb128k_step23w": {
+        "draft_model_path": "/workspace/code/SpecForge/outputs/qwen3-1p7b-eagle3-sharegpt-vb128k/epoch_9_step_230000",
         "base_model_path": "/data/HUGGINGFACE/Qwen3-1.7B"
       }
     }

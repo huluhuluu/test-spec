@@ -1,7 +1,11 @@
 [submodule "third_party/CMMLU"]
 	path = third_party/CMMLU
 	url = https://github.com/haonan-li/CMMLU.git
-[submodule "third_party/SpecForge"]
-	path = third_party/SpecForge
+[submodule "third_party/SpecForge-sliding-window"]
+	path = third_party/SpecForge-sliding-window
 	url = https://github.com/huluhuluu/SpecForge.git
 	branch = feat/sliding-window
+[submodule "third_party/SpecForge-mask-hidden"]
+	path = third_party/SpecForge-mask-hidden
+	url = https://github.com/huluhuluu/SpecForge.git
+	branch = feat/mask-hidden

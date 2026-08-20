@@ -9,7 +9,6 @@ import re
 import shutil
 import subprocess
 import sys
-import time
 from collections import Counter
 from dataclasses import dataclass
 from multiprocessing import get_context
@@ -70,6 +69,10 @@ SGLANG_SW_CONDA_ENV = os.environ.get(
     "SGLANG_SW_CONDA_ENV",
     RUN_CONDA_ENVS.get("sglang_sliding_window", "eagle3-sglang-sw-bench"),
 )
+SGLANG_SW_DRAFT_ATTENTION_BACKEND = os.environ.get(
+    "SGLANG_SW_DRAFT_ATTENTION_BACKEND",
+    "triton",
+)
 VLLM_CONDA_ENV = os.environ.get(
     "VLLM_CONDA_ENV",
     RUN_CONDA_ENVS.get("vllm", "eagle3-vllm-bench"),
@@ -100,11 +103,23 @@ MODEL_REGISTRY = {
         "base_repo_id": "Qwen/Qwen3-1.7B",
         "backend": BACKEND_SGLANG,
     },
+    "qwen3_1p7b_eagle3_vb128k_step23w": {
+        "display_name": "Qwen3-1.7B_eagle3_sharegpt_vb128k_step23w",
+        "draft_repo_id": "local/Qwen3-1.7B_eagle3",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SGLANG,
+    },
     "qwen3_4b_eagle3-angelslim": {
         "display_name": "AngelSlim/Qwen3-4B_eagle3",
         "draft_repo_id": "AngelSlim/Qwen3-4B_eagle3",
         "base_repo_id": "Qwen/Qwen3-4B",
         "backend": BACKEND_ANGELSLIM_EAGLE3,
+    },
+    "qwen3_4b_dflash_b16_sglang": {
+        "display_name": "local/Qwen3-4B-DFlash-b16",
+        "draft_repo_id": "local/Qwen3-4B-DFlash-b16",
+        "base_repo_id": "Qwen/Qwen3-4B",
+        "backend": BACKEND_SGLANG,
     },
     "taobao_qwen3_4b_eagle3": {
         "display_name": "taobao-mnn/Qwen3-4B-Instruct-2507-Eagle3",
@@ -133,6 +148,41 @@ MODEL_REGISTRY = {
     "qwen3_1p7b_sw64_sglang": {
         "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
         "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw64",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SGLANG,
+        "requires_sliding_window_specforge": True,
+    },
+    "qwen3_1p7b_sw128_sglang": {
+        "display_name": "local/qwen3-1.7b-eagle3-sharegpt-sw128",
+        "draft_repo_id": "local/qwen3-1.7b-eagle3-sharegpt-sw128",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SGLANG,
+        "requires_sliding_window_specforge": True,
+    },
+    "qwen3_1p7b_k2_sw128_sglang": {
+        "display_name": "local/qwen3-1.7b-eagle3-k2-sw128-sharegpt",
+        "draft_repo_id": "local/qwen3-1.7b-eagle3-k2-sw128-sharegpt",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SGLANG,
+        "requires_sliding_window_specforge": True,
+    },
+    "qwen3_1p7b_k2_sw256_sglang": {
+        "display_name": "local/qwen3-1.7b-eagle3-k2-sw256-sharegpt",
+        "draft_repo_id": "local/qwen3-1.7b-eagle3-k2-sw256-sharegpt",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SGLANG,
+        "requires_sliding_window_specforge": True,
+    },
+    "qwen3_1p7b_k2_sw256_mha_sglang": {
+        "display_name": "local/qwen3-1.7b-eagle3-k2-sw256-mha-sharegpt",
+        "draft_repo_id": "local/qwen3-1.7b-eagle3-k2-sw256-mha-sharegpt",
+        "base_repo_id": "Qwen/Qwen3-1.7B",
+        "backend": BACKEND_SGLANG,
+        "requires_sliding_window_specforge": True,
+    },
+    "qwen3_1p7b_k4_sw256_sglang": {
+        "display_name": "local/qwen3-1.7b-eagle3-k4-sw256-sharegpt",
+        "draft_repo_id": "local/qwen3-1.7b-eagle3-k4-sw256-sharegpt",
         "base_repo_id": "Qwen/Qwen3-1.7B",
         "backend": BACKEND_SGLANG,
         "requires_sliding_window_specforge": True,
@@ -246,7 +296,7 @@ def ensure_sliding_window_specforge_available(model_spec: ModelSpec) -> None:
         raise ImportError(
             "Sliding-window SGLang models require the modified SpecForge package. "
             "Install it in the selected runtime environment with "
-            "`pip install -e third_party/SpecForge` from the `feat/sliding-window` branch, "
+            "`pip install -e third_party/SpecForge-sliding-window` from the `feat/sliding-window` branch, "
             "or set SGLANG_SW_PYTHON_BIN / SGLANG_SW_CONDA_ENV to an environment that has it."
         ) from exc
     if not hasattr(module, "LlamaForCausalLMEagle3"):
@@ -299,6 +349,79 @@ def prepend_pythonpath(path: Path) -> None:
     if root in parts:
         return
     os.environ["PYTHONPATH"] = root if not current else f"{root}{os.pathsep}{current}"
+
+
+def prepend_import_path(path: Path) -> None:
+    root = str(path)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    prepend_pythonpath(path)
+
+
+def clear_imported_specforge() -> None:
+    for module_name in list(sys.modules):
+        if module_name == "specforge" or module_name.startswith("specforge."):
+            del sys.modules[module_name]
+
+
+def find_specforge_source_from_draft_path(draft_model_path: Path) -> Optional[Path]:
+    for path in (draft_model_path, *draft_model_path.parents):
+        if (path / "specforge" / "modeling" / "draft" / "llama3_eagle.py").exists():
+            return path
+    return None
+
+
+def sliding_window_specforge_source_path(draft_model_path: Path) -> Optional[Path]:
+    env_path = os.environ.get("SGLANG_SW_SPECFORGE_PATH")
+    if env_path:
+        return Path(env_path)
+    configured = RUN_EVAL_CONFIG.get("specforge_paths", {}).get("sliding_window")
+    if configured:
+        return project_path(configured)
+    inferred = find_specforge_source_from_draft_path(draft_model_path)
+    if inferred is not None:
+        return inferred
+    fallback = ROOT / "third_party" / "SpecForge-sliding-window"
+    return fallback if fallback.exists() else None
+
+
+def draft_model_config(draft_model_path: Path) -> dict[str, Any]:
+    config_path = draft_model_path / "config.json"
+    if not config_path.exists():
+        raise FileNotFoundError(f"Missing draft model config: {config_path}")
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def draft_training_args(draft_model_path: Path) -> dict[str, Any]:
+    state_path = draft_model_path / "training_state.pt"
+    if not state_path.exists():
+        return {}
+    try:
+        import torch
+
+        state = torch.load(state_path, map_location="cpu", weights_only=False)
+    except Exception:
+        return {}
+    if not isinstance(state, dict):
+        return {}
+    args = state.get("args")
+    if args is None:
+        return {}
+    if isinstance(args, dict):
+        return dict(args)
+    return vars(args) if hasattr(args, "__dict__") else {}
+
+
+def sliding_window_speculative_config(draft_model_path: Path) -> dict[str, int]:
+    training_args = draft_training_args(draft_model_path)
+    num_steps = SPEC_NUM_STEPS
+    if training_args.get("ttt_length") is not None:
+        num_steps = int(training_args["ttt_length"])
+    return {
+        "speculative_num_steps": num_steps,
+        "speculative_eagle_topk": SPEC_EAGLE_TOPK,
+        "speculative_num_draft_tokens": SPEC_NUM_DRAFT_TOKENS,
+    }
 
 
 def decode_token_pieces(tokenizer: Any, token_ids: list[int]) -> list[str]:
@@ -421,6 +544,18 @@ def merge_context_accept_length(summaries: list[dict[str, Any]]) -> list[dict[st
             }
         )
     return rows
+
+
+def merge_accept_length_histogram(summaries: list[dict[str, Any]]) -> dict[str, int]:
+    histogram = Counter()
+    for summary in summaries:
+        for key, value in summary.get("accept_length_histogram", {}).items():
+            histogram[int(key)] += int(value)
+    return {str(k): histogram[k] for k in sorted(histogram)}
+
+
+def sum_spec_trace_event_count(summaries: list[dict[str, Any]]) -> int:
+    return sum(int(summary.get("spec_trace_event_count", 0)) for summary in summaries)
 
 
 def build_trace_event(
@@ -735,80 +870,6 @@ def normalized_angelslim_eagle3_dir(draft_dir: Path) -> Path:
     return patched_dir
 
 
-def install_trace_patch(tokenizer: Any, trace_path: Path) -> None:
-    from sglang.srt.managers import scheduler_output_processor_mixin as sopm
-
-    if getattr(sopm, "_eagle3_trace_patched", False):
-        sopm._eagle3_trace_tokenizer = tokenizer
-        sopm._eagle3_trace_path = trace_path
-        sopm._eagle3_trace_step_counts = {}
-        return
-
-    original = sopm.SchedulerOutputProcessorMixin._resolve_spec_overlap_token_ids
-
-    def request_prefix_token_ids(req: Any) -> list[int]:
-        prefix: list[int] = []
-        for attr in ("origin_input_ids", "input_ids", "prompt_token_ids"):
-            value = getattr(req, attr, None)
-            if value is not None:
-                try:
-                    items = value.tolist() if hasattr(value, "tolist") else list(value)
-                except TypeError:
-                    items = []
-                if items:
-                    prefix.extend(int(token_id) for token_id in items)
-                    break
-        for attr in ("output_ids", "decoded_ids", "output_token_ids"):
-            value = getattr(req, attr, None)
-            if value is not None:
-                try:
-                    items = value.tolist() if hasattr(value, "tolist") else list(value)
-                except TypeError:
-                    items = []
-                if items:
-                    prefix.extend(int(token_id) for token_id in items)
-                    break
-        return prefix
-
-    def wrapped(self, result, batch):
-        predict_tokens = original(self, result, batch)
-        next_token_ids = result.next_token_ids.tolist()
-        accept_lens = result.accept_lens.tolist()
-        stride = self.draft_worker.speculative_num_draft_tokens
-        out_path = getattr(sopm, "_eagle3_trace_path", trace_path)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-
-        with out_path.open("a", encoding="utf-8") as fh:
-            for i, req in enumerate(batch.reqs):
-                chunk = next_token_ids[i * stride : (i + 1) * stride]
-                accept_len = int(accept_lens[i])
-                rid = req.rid
-                step_counts = getattr(sopm, "_eagle3_trace_step_counts", {})
-                step_index = int(step_counts.get(rid, 0)) + 1
-                step_counts[rid] = step_index
-                sopm._eagle3_trace_step_counts = step_counts
-                committed = chunk[: min(len(chunk), accept_len + 1)]
-                event = build_trace_event(
-                    rid=rid,
-                    backend=BACKEND_SGLANG,
-                    tokenizer=tokenizer,
-                    prefix_token_ids=request_prefix_token_ids(req),
-                    draft_chunk_token_ids=[int(token_id) for token_id in chunk],
-                    accept_len=accept_len,
-                    committed_token_ids=[int(token_id) for token_id in committed],
-                    step_index=step_index,
-                    extra={"ts": time.time()},
-                )
-                fh.write(json.dumps(event, ensure_ascii=False) + "\n")
-        return predict_tokens
-
-    sopm.SchedulerOutputProcessorMixin._resolve_spec_overlap_token_ids = wrapped
-    sopm._eagle3_trace_patched = True
-    sopm._eagle3_trace_tokenizer = tokenizer
-    sopm._eagle3_trace_path = trace_path
-    sopm._eagle3_trace_step_counts = {}
-
-
 def render_chat_prompt(tokenizer: Any, messages: list[dict[str, str]]) -> str:
     try:
         return tokenizer.apply_chat_template(
@@ -874,7 +935,12 @@ def adjusted_sampling_params(
 def extract_final_number(text: str) -> Optional[str]:
     if not text:
         return None
-    match = re.search(r"Final answer\s*:\s*(.+)", text, flags=re.IGNORECASE)
+    boxed = BOXED_RE.findall(text)
+    if boxed:
+        nums = NUM_RE.findall(boxed[-1].replace("$", ""))
+        if nums:
+            return nums[-1].replace(",", "").rstrip(".")
+    match = re.search(r"Final answer\s*:\s*(.+)", text, flags=re.IGNORECASE | re.DOTALL)
     source = match.group(1) if match else text
     nums = NUM_RE.findall(source.replace("$", ""))
     if not nums:
@@ -1366,6 +1432,18 @@ def evaluate_model_sglang(
 
     model_spec = model_specs([model_key])[0]
     ensure_sliding_window_specforge_available(model_spec)
+    speculative_num_steps = SPEC_NUM_STEPS
+    speculative_eagle_topk = SPEC_EAGLE_TOPK
+    speculative_num_draft_tokens = SPEC_NUM_DRAFT_TOKENS
+    speculative_draft_attention_backend = None
+    if model_spec.requires_sliding_window_specforge:
+        spec_config = sliding_window_speculative_config(model_spec.draft_local_dir)
+        speculative_num_steps = spec_config["speculative_num_steps"]
+        speculative_eagle_topk = spec_config["speculative_eagle_topk"]
+        speculative_num_draft_tokens = spec_config["speculative_num_draft_tokens"]
+        speculative_draft_attention_backend = SGLANG_SW_DRAFT_ATTENTION_BACKEND
+        os.environ["EAGLE3_SLIDING_WINDOW_EAGLE_PATCH"] = "1"
+        sitecustomize.install_sglang_sliding_window_eagle_patch()
     tokenizer = AutoTokenizer.from_pretrained(
         str(model_spec.base_local_dir),
         trust_remote_code=True,
@@ -1379,16 +1457,17 @@ def evaluate_model_sglang(
     os.environ["EAGLE3_TRACE_TOKENIZER_PATH"] = str(model_spec.base_local_dir)
     os.environ["EAGLE3_TRACE_PATH"] = str(trace_path)
     sitecustomize.install_sglang_trace_patch()
-    install_trace_patch(tokenizer, trace_path)
 
     engine = Engine(
         model_path=str(model_spec.base_local_dir),
         tokenizer_path=str(model_spec.base_local_dir),
         speculative_draft_model_path=str(model_spec.draft_local_dir),
         speculative_algorithm="EAGLE3",
-        speculative_num_steps=SPEC_NUM_STEPS,
-        speculative_eagle_topk=SPEC_EAGLE_TOPK,
-        speculative_num_draft_tokens=SPEC_NUM_DRAFT_TOKENS,
+        speculative_num_steps=speculative_num_steps,
+        speculative_eagle_topk=speculative_eagle_topk,
+        speculative_num_draft_tokens=speculative_num_draft_tokens,
+        speculative_draft_attention_backend=speculative_draft_attention_backend,
+        enable_multi_layer_eagle=False,
         trust_remote_code=True,
         mem_fraction_static=0.72,
         page_size=1,
@@ -1467,17 +1546,658 @@ def evaluate_model_sglang(
         "backend": model_spec.backend,
         "gpu_ids": gpu_ids,
         "speculative_config": {
-            "speculative_num_steps": SPEC_NUM_STEPS,
-            "speculative_eagle_topk": SPEC_EAGLE_TOPK,
-            "speculative_num_draft_tokens": SPEC_NUM_DRAFT_TOKENS,
+            "speculative_num_steps": speculative_num_steps,
+            "speculative_eagle_topk": speculative_eagle_topk,
+            "speculative_num_draft_tokens": speculative_num_draft_tokens,
+            "speculative_draft_attention_backend": speculative_draft_attention_backend,
             "context_length": EVAL_CONTEXT_LENGTH,
             "tensor_parallel_size": len(gpu_ids),
         },
         "datasets": summaries,
+        "accept_length_histogram": merge_accept_length_histogram(summaries),
         "context_accept_length": merge_context_accept_length(summaries),
+        "spec_trace_event_count": sum_spec_trace_event_count(summaries),
     }
     json_dump(model_log_dir / "model_summary.json", final_summary)
     return final_summary
+
+
+def evaluate_model_sglang_dflash(
+    model_key: str,
+    gpu_ids: list[int],
+    sample_size: int,
+    seed: int,
+    cmmlu_repo: str,
+    dataset_names: list[str],
+) -> dict[str, Any]:
+    del seed, cmmlu_repo
+    os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
+    os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
+    os.environ["HF_ENDPOINT"] = HF_ENDPOINT
+    os.environ["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
+    os.environ["EAGLE3_TRACE_BACKEND"] = "sglang"
+    os.environ["EAGLE3_TRACE_DFLASH"] = "1"
+    os.environ["EAGLE3_TRACE_CONTEXT_WINDOW"] = str(TRACE_CONTEXT_WINDOW)
+    prepend_pythonpath(ROOT)
+
+    from transformers import AutoTokenizer
+    from sglang.srt.entrypoints.engine import Engine
+    from eval import sitecustomize
+
+    model_spec = model_specs([model_key])[0]
+    config_summary = validate_dflash_config(
+        model_spec.base_local_dir,
+        model_spec.draft_local_dir,
+        expected_block_size=16,
+    )
+    block_size = int(config_summary["block_size"])
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_spec.base_local_dir),
+        trust_remote_code=True,
+    )
+
+    model_log_dir = LOGS_DIR / model_spec.key
+    if model_log_dir.exists():
+        shutil.rmtree(model_log_dir)
+    model_log_dir.mkdir(parents=True, exist_ok=True)
+    trace_path = model_log_dir / "spec_trace_raw.jsonl"
+    os.environ["EAGLE3_TRACE_TOKENIZER_PATH"] = str(model_spec.base_local_dir)
+    os.environ["EAGLE3_TRACE_PATH"] = str(trace_path)
+    sitecustomize.install_sglang_dflash_trace_patch()
+
+    engine = Engine(
+        model_path=str(model_spec.base_local_dir),
+        tokenizer_path=str(model_spec.base_local_dir),
+        speculative_draft_model_path=str(model_spec.draft_local_dir),
+        speculative_algorithm="DFLASH",
+        speculative_dflash_block_size=block_size,
+        speculative_num_draft_tokens=block_size,
+        speculative_num_steps=1,
+        speculative_eagle_topk=1,
+        dtype="bfloat16",
+        attention_backend="fa3",
+        trust_remote_code=True,
+        mem_fraction_static=0.75,
+        context_length=EVAL_CONTEXT_LENGTH,
+        tp_size=len(gpu_ids),
+    )
+
+    combined_path = model_log_dir / "combined_results.jsonl"
+    summaries = []
+    sample_paths = {name: SAMPLES_DIR / f"{name}.jsonl" for name in dataset_names}
+    missing = [str(path) for path in sample_paths.values() if not path.exists()]
+    if missing:
+        raise FileNotFoundError(
+            "Missing prepared sample files. Run `python -m eval.prepare_data` first. Missing: "
+            + ", ".join(missing)
+        )
+    try:
+        for dataset_name in dataset_names:
+            dataset_rows = read_jsonl(sample_paths[dataset_name])[:sample_size]
+            request_ids: set[str] = set()
+            result_rows: list[dict[str, Any]] = []
+            dataset_dir = model_log_dir / dataset_name
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            results_path = dataset_dir / "results.jsonl"
+            if results_path.exists():
+                results_path.unlink()
+
+            for sample in dataset_rows:
+                response = run_single_sample(engine, tokenizer, model_spec, dataset_name, sample)
+                if dataset_name == "mtbench":
+                    for turn in response["turns"]:
+                        request_ids.add(f"{response['rid']}:turn{turn['turn_index']}")
+                    score = {"metric_name": "generation_only", "score": None}
+                else:
+                    request_ids.add(response["rid"])
+                    score = score_sample(dataset_name, sample, response)
+
+                record = build_result_record(
+                    model_spec=model_spec,
+                    dataset_name=dataset_name,
+                    sample=sample,
+                    rid=response["rid"],
+                    response=response,
+                    score=score,
+                )
+                record["meta_info"] = normalize_sglang_meta_info(record["meta_info"])
+                record["spec_accept_length"] = record["meta_info"].get("spec_accept_length")
+                record["spec_accept_rate"] = record["meta_info"].get("spec_accept_rate")
+                record["spec_verify_ct"] = record["meta_info"].get("spec_verify_ct")
+                if dataset_name == "mtbench":
+                    record["turns"] = response["turns"]
+                append_jsonl(results_path, record)
+                append_jsonl(combined_path, record)
+                result_rows.append(record)
+
+            trace_events = flatten_trace_for_rids(trace_path, request_ids)
+            trace_out = dataset_dir / "spec_trace.jsonl"
+            with trace_out.open("w", encoding="utf-8") as f:
+                for event in trace_events:
+                    f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+            summary = summarise_dataset_results(
+                model_key=model_spec.key,
+                dataset_name=dataset_name,
+                results=result_rows,
+                trace_events=trace_events,
+            )
+            json_dump(dataset_dir / "summary.json", summary)
+            summaries.append(summary)
+    finally:
+        engine.shutdown()
+
+    final_summary = {
+        "model_key": model_spec.key,
+        "model_name": model_spec.display_name,
+        "backend": model_spec.backend,
+        "gpu_ids": gpu_ids,
+        "speculative_config": {
+            "speculative_algorithm": "DFLASH",
+            "speculative_dflash_block_size": block_size,
+            "speculative_num_draft_tokens": block_size,
+            "speculative_num_steps": 1,
+            "speculative_eagle_topk": 1,
+            "context_length": EVAL_CONTEXT_LENGTH,
+            "tensor_parallel_size": len(gpu_ids),
+        },
+        "config": config_summary,
+        "datasets": summaries,
+        "accept_length_histogram": merge_accept_length_histogram(summaries),
+        "context_accept_length": merge_context_accept_length(summaries),
+        "spec_trace_event_count": sum_spec_trace_event_count(summaries),
+    }
+    json_dump(model_log_dir / "model_summary.json", final_summary)
+    return final_summary
+
+
+def run_sliding_window_sglang_runtime_smoke(
+    model_spec: ModelSpec,
+    draft_model_path: Path,
+    gpu_ids: list[int],
+    model_log_dir: Path,
+) -> dict[str, Any]:
+    from transformers import AutoTokenizer
+    from sglang.srt.entrypoints.engine import Engine
+    from eval import sitecustomize
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
+    os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
+    os.environ["HF_ENDPOINT"] = HF_ENDPOINT
+    os.environ["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
+    os.environ["EAGLE3_SLIDING_WINDOW_EAGLE_PATCH"] = "1"
+    os.environ["EAGLE3_TRACE_BACKEND"] = "sglang"
+    os.environ["EAGLE3_TRACE_TOKENIZER_PATH"] = str(model_spec.base_local_dir)
+    os.environ["EAGLE3_TRACE_PATH"] = str(model_log_dir / "sliding_window_runtime_trace.jsonl")
+    os.environ["EAGLE3_TRACE_CONTEXT_WINDOW"] = str(TRACE_CONTEXT_WINDOW)
+
+    sitecustomize.install_sglang_sliding_window_eagle_patch()
+    sitecustomize.install_sglang_trace_patch()
+    spec_config = sliding_window_speculative_config(draft_model_path)
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        str(model_spec.base_local_dir),
+        trust_remote_code=True,
+    )
+    prompt = render_chat_prompt(
+        tokenizer,
+        [{"role": "user", "content": "Compute 12 + 30. Answer with only the number."}],
+    )
+    engine = Engine(
+        model_path=str(model_spec.base_local_dir),
+        tokenizer_path=str(model_spec.base_local_dir),
+        speculative_draft_model_path=str(draft_model_path),
+        speculative_algorithm="EAGLE3",
+        speculative_num_steps=spec_config["speculative_num_steps"],
+        speculative_eagle_topk=spec_config["speculative_eagle_topk"],
+        speculative_num_draft_tokens=spec_config["speculative_num_draft_tokens"],
+        speculative_draft_attention_backend=SGLANG_SW_DRAFT_ATTENTION_BACKEND,
+        enable_multi_layer_eagle=False,
+        trust_remote_code=True,
+        mem_fraction_static=0.72,
+        page_size=1,
+        context_length=EVAL_CONTEXT_LENGTH,
+        tp_size=len(gpu_ids),
+    )
+    try:
+        response = engine.generate(
+            prompt=prompt,
+            sampling_params={"temperature": 0.0, "max_new_tokens": 8},
+            rid="sliding-window-runtime-smoke",
+        )
+    finally:
+        engine.shutdown()
+
+    meta_info = normalize_sglang_meta_info(response.get("meta_info", {}))
+    return {
+        "loaded": True,
+        "output_text": response.get("text", ""),
+        "meta_info": meta_info,
+        **spec_config,
+        "speculative_draft_attention_backend": SGLANG_SW_DRAFT_ATTENTION_BACKEND,
+        "enable_multi_layer_eagle": False,
+    }
+
+
+def run_sliding_window_smoke_test(
+    model_key: str,
+    gpu_ids: list[int],
+    seq_length: int,
+    seed: int,
+    draft_model_path: Optional[Path] = None,
+    expected_num_layers: Optional[int] = None,
+    expected_sliding_window: Optional[int] = None,
+    run_runtime: bool = True,
+) -> dict[str, Any]:
+    if len(gpu_ids) != 1:
+        raise ValueError("test-sliding-window currently expects exactly one GPU.")
+    if seq_length < 2:
+        raise ValueError("test-sliding-window requires seq_length >= 2.")
+
+    model_spec = model_specs([model_key])[0]
+    if not model_spec.requires_sliding_window_specforge:
+        raise ValueError(f"{model_key} is not configured as a sliding-window model.")
+
+    draft_model_path = (
+        Path(draft_model_path) if draft_model_path else model_spec.draft_local_dir
+    )
+    config = draft_model_config(draft_model_path)
+    num_layers = int(config.get("num_hidden_layers", 1))
+    sliding_window = config.get("sliding_window")
+    max_window_layers = config.get("max_window_layers")
+    use_sliding_window = bool(config.get("use_sliding_window", False))
+    if num_layers < 2:
+        raise RuntimeError(f"Expected a multi-layer draft model, found {num_layers} layer.")
+    if expected_num_layers is not None and num_layers != expected_num_layers:
+        raise RuntimeError(
+            f"Expected {expected_num_layers} draft layers, found {num_layers}."
+        )
+    if sliding_window is None:
+        raise RuntimeError("Expected sliding_window in draft config.")
+    sliding_window = int(sliding_window)
+    if (
+        expected_sliding_window is not None
+        and sliding_window != expected_sliding_window
+    ):
+        raise RuntimeError(
+            f"Expected sliding_window={expected_sliding_window}, found {sliding_window}."
+        )
+    if not use_sliding_window:
+        raise RuntimeError("Expected use_sliding_window=true in draft config.")
+    if max_window_layers is None:
+        raise RuntimeError("Expected max_window_layers in draft config.")
+    max_window_layers = int(max_window_layers)
+    if max_window_layers != num_layers:
+        raise RuntimeError(
+            f"Expected max_window_layers={num_layers}, found {max_window_layers}."
+        )
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
+    os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
+    os.environ["HF_ENDPOINT"] = HF_ENDPOINT
+    specforge_path = sliding_window_specforge_source_path(draft_model_path)
+    if specforge_path is not None:
+        prepend_import_path(specforge_path)
+        clear_imported_specforge()
+    prepend_import_path(ROOT)
+    os.environ["EAGLE3_SLIDING_WINDOW_EAGLE_PATCH"] = "1"
+
+    from eval import sitecustomize
+
+    sitecustomize.install_sglang_sliding_window_eagle_patch()
+    sglang_eagle3_module = importlib.import_module("sglang.srt.models.llama_eagle3")
+    sglang_patch_installed = bool(
+        getattr(
+            sglang_eagle3_module.LlamaForCausalLMEagle3,
+            "_sliding_window_eagle3_patched",
+            False,
+        )
+    )
+    if not sglang_patch_installed:
+        raise RuntimeError("SGLang Eagle3 patch for internal multi-layer draft models was not installed.")
+    sglang_window_method = getattr(
+        sglang_eagle3_module.LlamaForCausalLMEagle3,
+        "get_attention_sliding_window_size",
+        None,
+    )
+    if sglang_window_method is None:
+        raise RuntimeError("SGLang Eagle3 patch did not expose get_attention_sliding_window_size().")
+
+    class _WindowProbe:
+        config = type(
+            "Config",
+            (),
+            {"use_sliding_window": use_sliding_window, "sliding_window": sliding_window},
+        )()
+
+    sglang_attention_sliding_window_size = sglang_window_method(_WindowProbe())
+    if sglang_attention_sliding_window_size != sliding_window - 1:
+        raise RuntimeError(
+            "Unexpected SGLang attention sliding-window size: "
+            f"{sglang_attention_sliding_window_size}"
+        )
+
+    try:
+        module = importlib.import_module("specforge.modeling.draft.llama3_eagle")
+    except ImportError as exc:
+        raise ImportError(
+            "Sliding-window smoke requires the modified SpecForge package. "
+            "Run this command in an environment with the feat/sliding-window checkout installed."
+        ) from exc
+    model_cls = getattr(module, "LlamaForCausalLMEagle3", None)
+    if model_cls is None or not hasattr(model_cls, "_layer_caches"):
+        raise ImportError(
+            "The selected SpecForge package does not expose multi-layer sliding-window Eagle3. "
+            f"Loaded module from {getattr(module, '__file__', 'unknown')}."
+        )
+
+    import torch
+
+    from specforge.modeling.auto import AutoEagle3DraftModel
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("test-sliding-window requires CUDA.")
+    device = torch.device("cuda:0")
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+    draft_model = AutoEagle3DraftModel.from_pretrained(
+        str(draft_model_path),
+        dtype=dtype,
+        attention_backend="sdpa",
+    ).to(device)
+    draft_model.eval()
+
+    if int(getattr(draft_model, "num_draft_layers", 1)) != num_layers:
+        raise RuntimeError(
+            "Loaded draft model did not instantiate the expected number of layers."
+        )
+    if (
+        not hasattr(draft_model, "layers")
+        or len(draft_model.layers) != num_layers
+    ):
+        raise RuntimeError("Loaded draft model does not expose the expected layers ModuleList.")
+    layer_windows = [
+        getattr(layer.self_attn, "sliding_window", None) for layer in draft_model.layers
+    ]
+    if layer_windows != [sliding_window] * num_layers:
+        raise RuntimeError(f"Unexpected per-layer sliding windows: {layer_windows}")
+
+    layer_forward_counts = [0 for _ in range(num_layers)]
+    original_forwards = []
+    for layer_idx, layer in enumerate(draft_model.layers):
+        original_forward = layer.forward
+        original_forwards.append(original_forward)
+
+        def counted_forward(
+            *args: Any,
+            _idx: int = layer_idx,
+            _forward: Any = original_forward,
+            **kwargs: Any,
+        ) -> Any:
+            layer_forward_counts[_idx] += 1
+            return _forward(*args, **kwargs)
+
+        layer.forward = counted_forward
+
+    vocab_size = int(getattr(draft_model.config, "vocab_size", 0))
+    if vocab_size <= 0:
+        raise RuntimeError(f"Invalid draft model vocab_size={vocab_size}.")
+    input_high = min(vocab_size, 32000)
+    input_ids = torch.randint(
+        low=0,
+        high=input_high,
+        size=(1, seq_length),
+        dtype=torch.long,
+        device=device,
+    )
+    attention_mask = torch.ones((1, seq_length), dtype=torch.long, device=device)
+    hidden_width = int(draft_model.fc.in_features)
+    hidden_states = torch.randn(
+        (1, seq_length, hidden_width),
+        dtype=dtype,
+        device=device,
+    )
+    inputs_embeds = draft_model.embed_input_ids(input_ids).to(dtype)
+
+    try:
+        with torch.no_grad():
+            draft_hidden = draft_model(
+                hidden_states=hidden_states,
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                ttt_length=2,
+            )
+            draft_logits = draft_model.lm_head(draft_hidden)
+    finally:
+        for layer, original_forward in zip(draft_model.layers, original_forwards):
+            layer.forward = original_forward
+
+    if layer_forward_counts != [1] * num_layers:
+        raise RuntimeError(
+            f"Expected each draft layer to run once, got {layer_forward_counts}."
+        )
+    if not torch.isfinite(draft_hidden.float()).all():
+        raise RuntimeError("Draft hidden states contain non-finite values.")
+    if not torch.isfinite(draft_logits.float()).all():
+        raise RuntimeError("Draft logits contain non-finite values.")
+
+    model_num_draft_layers = int(draft_model.num_draft_layers)
+    hidden_states_shape = list(hidden_states.shape)
+    draft_hidden_shape = list(draft_hidden.shape)
+    draft_logits_shape = list(draft_logits.shape)
+    draft_hidden_abs_mean = float(draft_hidden.float().abs().mean().item())
+    draft_logits_abs_mean = float(draft_logits.float().abs().mean().item())
+
+    del draft_logits, draft_hidden, hidden_states, inputs_embeds, draft_model
+    torch.cuda.empty_cache()
+
+    model_log_dir = LOGS_DIR / model_spec.key
+    model_log_dir.mkdir(parents=True, exist_ok=True)
+    runtime_summary = None
+    if run_runtime:
+        runtime_summary = run_sliding_window_sglang_runtime_smoke(
+            model_spec=model_spec,
+            draft_model_path=draft_model_path,
+            gpu_ids=gpu_ids,
+            model_log_dir=model_log_dir,
+        )
+
+    summary = {
+        "backend": "specforge_sliding_window_direct_and_sglang_runtime",
+        "model": model_key,
+        "specforge_module": getattr(module, "__file__", None),
+        "specforge_source_path": str(specforge_path) if specforge_path is not None else None,
+        "sglang_eagle3_module": getattr(sglang_eagle3_module, "__file__", None),
+        "sglang_internal_layers_patch": sglang_patch_installed,
+        "sglang_attention_sliding_window_size": sglang_attention_sliding_window_size,
+        "draft_model_path": str(draft_model_path),
+        "gpu_ids": gpu_ids,
+        "seq_length": seq_length,
+        "expected_num_layers": expected_num_layers,
+        "expected_sliding_window": expected_sliding_window,
+        "config_num_hidden_layers": num_layers,
+        "model_num_draft_layers": model_num_draft_layers,
+        "sliding_window": sliding_window,
+        "use_sliding_window": use_sliding_window,
+        "max_window_layers": max_window_layers,
+        "layer_sliding_windows": layer_windows,
+        "layer_forward_counts": layer_forward_counts,
+        "hidden_states_shape": hidden_states_shape,
+        "draft_hidden_shape": draft_hidden_shape,
+        "draft_logits_shape": draft_logits_shape,
+        "draft_hidden_abs_mean": draft_hidden_abs_mean,
+        "draft_logits_abs_mean": draft_logits_abs_mean,
+        "sglang_runtime": runtime_summary,
+    }
+    json_dump(model_log_dir / "sliding_window_smoke_summary.json", summary)
+    return summary
+
+
+def validate_dflash_config(
+    base_model_path: Path,
+    draft_model_path: Path,
+    expected_block_size: Optional[int],
+) -> dict[str, Any]:
+    base_config_path = base_model_path / "config.json"
+    if not base_config_path.exists():
+        raise FileNotFoundError(f"Missing base model config: {base_config_path}")
+    base_config = json.loads(base_config_path.read_text(encoding="utf-8"))
+    draft_config = draft_model_config(draft_model_path)
+
+    architectures = draft_config.get("architectures") or []
+    if "DFlashDraftModel" not in architectures:
+        raise RuntimeError(f"Expected DFlashDraftModel architecture, found {architectures}.")
+    auto_map = draft_config.get("auto_map") or {}
+    if auto_map.get("AutoModel") != "dflash.DFlashDraftModel":
+        raise RuntimeError(f"Unexpected DFlash AutoModel mapping: {auto_map}.")
+
+    block_size = int(draft_config.get("block_size", 0))
+    if block_size <= 0:
+        raise RuntimeError(f"Invalid DFlash block_size={block_size}.")
+    if expected_block_size is not None and block_size != expected_block_size:
+        raise RuntimeError(
+            f"Expected DFlash block_size={expected_block_size}, found {block_size}."
+        )
+
+    dflash_config = draft_config.get("dflash_config")
+    if not isinstance(dflash_config, dict):
+        raise RuntimeError("Missing DFlash dflash_config in draft config.")
+    target_layer_ids = dflash_config.get("target_layer_ids")
+    if not isinstance(target_layer_ids, list) or not target_layer_ids:
+        raise RuntimeError(f"Invalid DFlash target_layer_ids={target_layer_ids}.")
+    if any(not isinstance(layer_id, int) for layer_id in target_layer_ids):
+        raise RuntimeError(f"DFlash target_layer_ids must be integers: {target_layer_ids}.")
+
+    base_num_layers = int(base_config.get("num_hidden_layers", 0))
+    num_target_layers = int(draft_config.get("num_target_layers", 0))
+    if base_num_layers <= 0:
+        raise RuntimeError(f"Invalid base num_hidden_layers={base_num_layers}.")
+    if num_target_layers != base_num_layers:
+        raise RuntimeError(
+            f"DFlash num_target_layers={num_target_layers} does not match "
+            f"base num_hidden_layers={base_num_layers}."
+        )
+    if max(target_layer_ids) >= base_num_layers:
+        raise RuntimeError(
+            f"DFlash target_layer_ids exceed base layer count: {target_layer_ids}."
+        )
+
+    for key in ("model_type", "hidden_size", "vocab_size"):
+        if draft_config.get(key) != base_config.get(key):
+            raise RuntimeError(
+                f"DFlash draft/base config mismatch for {key}: "
+                f"draft={draft_config.get(key)!r}, base={base_config.get(key)!r}."
+            )
+
+    return {
+        "base_model_path": str(base_model_path),
+        "draft_model_path": str(draft_model_path),
+        "base_model_type": base_config.get("model_type"),
+        "base_num_hidden_layers": base_num_layers,
+        "draft_architectures": architectures,
+        "draft_auto_map": auto_map,
+        "draft_num_hidden_layers": int(draft_config.get("num_hidden_layers", 0)),
+        "draft_num_target_layers": num_target_layers,
+        "block_size": block_size,
+        "target_layer_ids": target_layer_ids,
+        "mask_token_id": dflash_config.get("mask_token_id"),
+    }
+
+
+def run_dflash_smoke_test(
+    model_key: str,
+    gpu_ids: list[int],
+    draft_model_path: Optional[Path] = None,
+    base_model_path: Optional[Path] = None,
+    expected_block_size: Optional[int] = 16,
+    max_new_tokens: int = 8,
+    attention_backend: str = "fa3",
+    mem_fraction_static: float = 0.75,
+) -> dict[str, Any]:
+    if len(gpu_ids) != 1:
+        raise ValueError("test-dflash currently expects exactly one GPU.")
+    if max_new_tokens <= 0:
+        raise ValueError("test-dflash requires --max-new-tokens > 0.")
+
+    model_spec = model_specs([model_key])[0]
+    base_path = Path(base_model_path) if base_model_path else model_spec.base_local_dir
+    draft_path = Path(draft_model_path) if draft_model_path else model_spec.draft_local_dir
+    config_summary = validate_dflash_config(base_path, draft_path, expected_block_size)
+    block_size = int(config_summary["block_size"])
+
+    os.environ["CUDA_VISIBLE_DEVICES"] = format_gpu_ids(gpu_ids)
+    os.environ["HF_HOME"] = str(DEFAULT_HF_HOME)
+    os.environ["HF_ENDPOINT"] = HF_ENDPOINT
+    os.environ["SGLANG_ALLOW_OVERWRITE_LONGER_CONTEXT_LEN"] = "1"
+    prepend_pythonpath(ROOT)
+
+    from transformers import AutoTokenizer
+    from sglang.srt.entrypoints.engine import Engine
+    from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
+
+    if SpeculativeAlgorithm.from_string("DFLASH").name != "DFLASH":
+        raise RuntimeError("The active SGLang install does not support DFLASH.")
+
+    tokenizer = AutoTokenizer.from_pretrained(str(base_path), trust_remote_code=True)
+    prompt = render_chat_prompt(
+        tokenizer,
+        [{"role": "user", "content": "Compute 12 + 30. Answer with only the number."}],
+    )
+
+    model_log_dir = LOGS_DIR / model_spec.key
+    model_log_dir.mkdir(parents=True, exist_ok=True)
+    engine = Engine(
+        model_path=str(base_path),
+        tokenizer_path=str(base_path),
+        speculative_algorithm="DFLASH",
+        speculative_draft_model_path=str(draft_path),
+        speculative_dflash_block_size=block_size,
+        speculative_num_draft_tokens=block_size,
+        speculative_num_steps=1,
+        speculative_eagle_topk=1,
+        dtype="bfloat16",
+        attention_backend=attention_backend,
+        trust_remote_code=True,
+        mem_fraction_static=mem_fraction_static,
+        context_length=EVAL_CONTEXT_LENGTH,
+        tp_size=len(gpu_ids),
+    )
+    try:
+        response = engine.generate(
+            prompt=prompt,
+            sampling_params={"temperature": 0.0, "max_new_tokens": max_new_tokens},
+            rid="dflash-smoke",
+        )
+    finally:
+        engine.shutdown()
+
+    output_text = response.get("text", "")
+    if not isinstance(output_text, str) or not output_text.strip():
+        raise RuntimeError(f"DFlash smoke generated empty output: {response!r}")
+    meta_info = normalize_sglang_meta_info(response.get("meta_info", {}))
+    summary = {
+        "backend": "sglang_dflash",
+        "model": model_key,
+        "display_name": model_spec.display_name,
+        "gpu_ids": gpu_ids,
+        "attention_backend": attention_backend,
+        "mem_fraction_static": mem_fraction_static,
+        "max_new_tokens": max_new_tokens,
+        "speculative_config": {
+            "speculative_algorithm": "DFLASH",
+            "speculative_dflash_block_size": block_size,
+            "speculative_num_draft_tokens": block_size,
+            "speculative_num_steps": 1,
+            "speculative_eagle_topk": 1,
+        },
+        "config": config_summary,
+        "output_text": output_text,
+        "meta_info": meta_info,
+    }
+    json_dump(model_log_dir / "dflash_smoke_summary.json", summary)
+    return summary
 
 
 def generate_vllm_single(
@@ -1885,7 +2605,9 @@ def evaluate_model_vllm(
             "tensor_parallel_size": len(gpu_ids),
         },
         "datasets": summaries,
+        "accept_length_histogram": merge_accept_length_histogram(summaries),
         "context_accept_length": merge_context_accept_length(summaries),
+        "spec_trace_event_count": sum_spec_trace_event_count(summaries),
     }
     json_dump(model_log_dir / "model_summary.json", final_summary)
     return final_summary
@@ -2064,7 +2786,9 @@ def evaluate_model_angelslim_eagle3(
             "tensor_parallel_size": len(gpu_ids),
         },
         "datasets": summaries,
+        "accept_length_histogram": merge_accept_length_histogram(summaries),
         "context_accept_length": merge_context_accept_length(summaries),
+        "spec_trace_event_count": sum_spec_trace_event_count(summaries),
     }
     json_dump(model_log_dir / "model_summary.json", final_summary)
     return final_summary
@@ -2083,6 +2807,15 @@ def evaluate_model_current_process(
         return evaluate_model_vllm(model_key, gpu_ids, sample_size, seed, cmmlu_repo, dataset_names)
     if model_spec.backend == BACKEND_ANGELSLIM_EAGLE3:
         return evaluate_model_angelslim_eagle3(
+            model_key,
+            gpu_ids,
+            sample_size,
+            seed,
+            cmmlu_repo,
+            dataset_names,
+        )
+    if model_key == "qwen3_4b_dflash_b16_sglang":
+        return evaluate_model_sglang_dflash(
             model_key,
             gpu_ids,
             sample_size,
@@ -2195,6 +2928,34 @@ def parse_args() -> argparse.Namespace:
     p_run_model.add_argument("--model", required=True, choices=list(MODEL_REGISTRY))
     p_run_model.add_argument("--gpus", nargs="+", required=True, type=int)
 
+    p_sliding_window = sub.add_parser("test-sliding-window")
+    p_sliding_window.add_argument(
+        "--model",
+        default="qwen3_1p7b_k2_sw128_sglang",
+        choices=list(MODEL_REGISTRY),
+    )
+    p_sliding_window.add_argument("--draft-model-path", type=Path)
+    p_sliding_window.add_argument("--gpus", nargs="+", required=True, type=int)
+    p_sliding_window.add_argument("--expected-num-layers", type=int, default=None)
+    p_sliding_window.add_argument("--expected-sliding-window", type=int, default=None)
+    p_sliding_window.add_argument("--seq-length", type=int, default=160)
+    p_sliding_window.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    p_sliding_window.add_argument("--skip-runtime", action="store_true")
+
+    p_dflash = sub.add_parser("test-dflash")
+    p_dflash.add_argument(
+        "--model",
+        default="qwen3_4b_dflash_b16_sglang",
+        choices=list(MODEL_REGISTRY),
+    )
+    p_dflash.add_argument("--draft-model-path", type=Path)
+    p_dflash.add_argument("--base-model-path", type=Path)
+    p_dflash.add_argument("--gpus", nargs="+", required=True, type=int)
+    p_dflash.add_argument("--expected-block-size", type=int, default=16)
+    p_dflash.add_argument("--max-new-tokens", type=int, default=8)
+    p_dflash.add_argument("--attention-backend", default="fa3")
+    p_dflash.add_argument("--mem-fraction-static", type=float, default=0.75)
+
     return parser.parse_args()
 
 
@@ -2222,6 +2983,34 @@ def main() -> None:
             str(args.cmmlu_repo),
             args.datasets,
         )
+        return
+
+    if args.command == "test-sliding-window":
+        summary = run_sliding_window_smoke_test(
+            args.model,
+            args.gpus,
+            args.seq_length,
+            args.seed,
+            args.draft_model_path,
+            args.expected_num_layers,
+            args.expected_sliding_window,
+            not args.skip_runtime,
+        )
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+        return
+
+    if args.command == "test-dflash":
+        summary = run_dflash_smoke_test(
+            model_key=args.model,
+            gpu_ids=args.gpus,
+            draft_model_path=args.draft_model_path,
+            base_model_path=args.base_model_path,
+            expected_block_size=args.expected_block_size,
+            max_new_tokens=args.max_new_tokens,
+            attention_backend=args.attention_backend,
+            mem_fraction_static=args.mem_fraction_static,
+        )
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
         return
 
 

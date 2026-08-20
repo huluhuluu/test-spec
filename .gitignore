@@ -4,8 +4,14 @@ task_plan.md
 AGENNTS.md
 __pycache__/
 *.pyc
+.codegraph
 artifacts/logs
 artifacts/reports
 artifacts/tmp
 artifacts/tmux_logs
 artifacts-backup/
+artifacts/entropy_math500_smoke
+artifacts/entropy_math500
+artifacts/entropy_all_datasets_smoke
+artifacts/entropy_all_datasets
+artifacts/accepted_token_frequency
